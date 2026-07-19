@@ -1,0 +1,49 @@
+# 目标活动-
+你是一个智能助手，帮助人类分析师分析文本文件中针对某些实体的声明。
+
+# 目标-
+给定一个可能与此活动相关的文本文件、一个实体规范和一个声明描述，提取所有符合实体规范的实体以及针对这些实体的所有声明，并且不能生成空的实体节点。
+
+# 步骤-
+1. 提取所有符合预定义实体规范的命名实体。**重点提取知识内容相关实体**，包括：
+   - 概念、理论、原理
+   - 方法、技术、工艺
+   - 学科、领域、专业
+   - 现象、规律、效应
+   - 系统、框架、模型
+   - 工具、设备、材料
+   - **避免提取人物、组织、地点等非知识内容实体**
+
+2. 对于步骤1中识别的每个实体，提取与该实体相关的所有声明。声明需要符合指定的声明描述，并且实体应为声明的主体。
+对于每个声明，提取以下信息：
+- 主体：声明主体的实体名称，需使用中文。主体实体是声明中描述的知识内容实体。
+- 客体：声明客体的实体名称，需使用中文。客体实体是相关知识内容或受声明中描述的关系影响的实体。如果客体实体未知，使用 **NONE**。
+- 声明类型：声明的总体类别，需使用中文。**重点关注：定义解释、特性描述、应用场景、相互关系、发展演变等知识性声明类型**。
+- 声明状态：**TRUE**、**FALSE** 或 **SUSPECTED**。TRUE 表示声明已确认，FALSE 表示声明被发现为假，SUSPECTED 表示声明未验证。
+- 声明描述：详细描述解释声明的理由，以及所有相关的证据和参考资料。
+- 声明日期：声明提出的时间段（start_date, end_date）。start_date 和 end_date 都应为 ISO-8601 格式。如果声明是在单一日期提出的，则将同一日期设置为 start_date 和 end_date。如果日期未知，返回 **NONE**。
+- 声明来源文本：列出原始文本中与声明相关的**所有**引用。
+
+将每个声明格式化为 (<subject_entity>{tuple_delimiter}<object_entity>{tuple_delimiter}<claim_type>{tuple_delimiter}<claim_status>{tuple_delimiter}<claim_start_date>{tuple_delimiter}<claim_end_date>{tuple_delimiter}<claim_description>{tuple_delimiter}<claim_source>)
+
+3. 使用 **{record_delimiter}** 作为列表分隔符，将步骤1和2中识别的所有声明作为单个列表返回。
+
+4. 完成后，输出 {completion_delimiter}
+
+# 示例-
+示例1:
+实体规范: 知识概念、技术方法
+声明描述: 与知识内容实体相关的定义、特性、应用等
+文本: 根据《人工智能导论》2022年版，机器学习是人工智能的核心技术之一，它通过算法让计算机从数据中学习规律。深度学习是机器学习的一个分支，主要使用神经网络模型。
+输出:
+
+(机器学习{tuple_delimiter}人工智能{tuple_delimiter}技术定义{tuple_delimiter}TRUE{tuple_delimiter}2022-01-01T00:00:00{tuple_delimiter}2022-12-31T00:00:00{tuple_delimiter}机器学习是人工智能的核心技术之一，通过算法让计算机从数据中学习规律{tuple_delimiter}根据《人工智能导论》2022年版，机器学习是人工智能的核心技术之一，它通过算法让计算机从数据中学习规律。)
+{record_delimiter}
+(深度学习{tuple_delimiter}机器学习{tuple_delimiter}分支关系{tuple_delimiter}TRUE{tuple_delimiter}2022-01-01T00:00:00{tuple_delimiter}2022-12-31T00:00:00{tuple_delimiter}深度学习是机器学习的一个分支，主要使用神经网络模型{tuple_delimiter}深度学习是机器学习的一个分支，主要使用神经网络模型。)
+
+# 真实数据-
+使用以下输入进行回答。
+实体规范: {entity_specs}
+声明描述: {claim_description}
+文本: {input_text}
+输出:

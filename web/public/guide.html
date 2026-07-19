@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>学院会议议题结构图</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    // 'default' 默认主题，浅色背景
+    // 'dark'  暗色模式，适合夜间或暗色网页
+    // 'forest'  类似绿色森林风格，绿色主色调
+    // 'neutral' 更加简洁、中性灰调
+    // 'base'
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      themeVariables: {
+        fontFamily: 'Arial',
+        fontSize: '24px'
+      }
+  });
+
+  </script>
+  <style>
+    body {
+      font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif;
+      margin: 0;
+      padding: 0;
+      background-color: #f4f6f9;
+      color: #2c3e50;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }
+
+    h2 {
+      font-size: 24px;
+      margin-bottom: 20px;
+      text-align: center;
+      color: #34495e;
+    }
+
+    .mermaid-container {
+      background: #ffffff;
+      padding: 24px;
+      border-radius: 16px;
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+      overflow-x: auto;
+      transition: background 0.3s ease;
+    }
+
+    .mermaid {
+      min-width: 900px;
+    }
+
+    /* 滚动条美化（仅桌面端） */
+    .mermaid-container::-webkit-scrollbar {
+      height: 8px;
+    }
+
+    .mermaid-container::-webkit-scrollbar-track {
+      background: #ecf0f1;
+      border-radius: 4px;
+    }
+
+    .mermaid-container::-webkit-scrollbar-thumb {
+      background-color: #95a5a6;
+      border-radius: 4px;
+    }
+
+    @media (max-width: 768px) {
+      h2 {
+        font-size: 20px;
+      }
+      .container {
+        margin: 20px auto;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h2>学院会议议题结构图（横向流程图）</h2>
+
+    <div class="mermaid-container">
+
+<div class="mermaid">
+flowchart LR
+  Start[提交会议]
+  
+  Start --> A[党委会]
+  Start --> B[党政联席会议]
+  
+  %% 党委会分支
+  A --> A1[讨论决定]
+  A --> A2[先行把关]
+  
+  A1 --> A1a[学院党建工作规划的制定？]
+  A1a --> A1a_cat[📂 分类]
+  A1a --> A1a_analysis[🧠 分析]
+  
+  A1a_cat --> A1a1["党的建设事项 →<br>&nbsp;&nbsp;&nbsp;党建工作规划、年度工作计划、改革举措、规章制度的制定和修订<br>&nbsp;&nbsp;&nbsp;学院党建工作规划（1-3-1）"]
+  A1a_analysis --> A1a2["根据《会议事项层级结构》，学院党建工作规划属于党建工作的重要事项，<br>&nbsp;&nbsp;&nbsp;应由党委会讨论决定，党政联席会议无决策权。"]
+
+  A2 --> A2a[教师职称评定事项？]
+  A2a --> A2a_cat[📂 分类]
+  A2a --> A2a_analysis[🧠 分析]
+
+  A2a_cat --> A2a1["事关教师队伍建设的事项 →<br>&nbsp;&nbsp;&nbsp;教职员工的聘用、调动、晋升、考核、职称职级评定中的重要事项<br>&nbsp;&nbsp;&nbsp;教职员工职称职级评定（5-2-3）"]
+  A2a_analysis --> A2a2["根据《会议事项层级结构》，教师职称评定事项属于该类重要事项，<br>&nbsp;&nbsp;&nbsp;需提交党委会先行把关，同时提交党政联席会议讨论决定。"]
+
+  %% 党政联席会议分支
+  B --> B1[讨论决定]
+  B1 --> B1a[教师职称评定事项？]
+  B1a --> B1a_cat[📂 分类]
+  B1a --> B1a_analysis[🧠 分析]
+
+  B1a_cat --> B1a1["事关教师队伍建设的事项 →<br>&nbsp;&nbsp;&nbsp;教职员工的聘用、调动、晋升、考核、职称职级评定、薪酬分配中的重要事项<br>&nbsp;&nbsp;&nbsp;教职员工职称职级评定（5-2-3）"]
+  B1a_analysis --> B1a2["根据《会议事项层级结构》，教师职称评定事项需提交党委会把关，<br>&nbsp;&nbsp;&nbsp;并提交党政联席会议讨论决定。"]
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

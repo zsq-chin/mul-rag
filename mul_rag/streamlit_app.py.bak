@@ -1,0 +1,993 @@
+import streamlit as st
+import requests
+import json
+import time
+import os
+import re
+import pandas as pd
+import urllib.parse
+import base64
+
+# 设置页面配置
+st.set_page_config(
+    page_title="多模态 RAG 系统 (Python版)",
+    page_icon="🤖",
+    layout="wide"
+)
+
+# 初始化 Session State
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "kb_id" not in st.session_state:
+    st.session_state.kb_id = None
+if "file_id" not in st.session_state:
+    st.session_state.file_id = None
+if "session_id" not in st.session_state:
+    st.session_state.session_id = f"sess_{int(time.time())}"
+if "parsing_status" not in st.session_state:
+    st.session_state.parsing_status = "idle"
+
+# Sidebar 配置
+with st.sidebar:
+    api_base = "http://202.204.194.41:8001/api/v1"
+
+    st.subheader("📚 知识库")
+
+    # 1) 拉取知识库列表
+    kb_items = []
+    try:
+        kb_resp = requests.get(f"{api_base}/kb/list", timeout=10)
+        if kb_resp.status_code == 200:
+            kb_items = kb_resp.json().get("kbs", [])
+        else:
+            st.warning("无法获取知识库列表")
+    except Exception as e:
+        st.warning(f"连接错误: {e}")
+
+    # 2) 新建知识库
+    new_kb_name = st.text_input("新建知识库名称(必填)", value="")
+
+    # 仅做 UI 选择：后端会把配置写入 KB 元数据
+    embed_model = st.text_input("向量模型 (embedModel)", value="bge-m3:latest")
+    vector_store_type = st.selectbox(
+            "向量库类型 (vectorStoreType)",
+            options=["faiss", "milvus", "es"],
+            index=0,
+            help="faiss: 本地索引; milvus/es: 需在后端安装依赖并配置连接(环境变量)。",
+        )
+    if st.button("新建知识库"):
+        try:
+            resp = requests.post(
+                f"{api_base}/kb/create",
+                json={
+                    "kbName": new_kb_name,
+                    "embedModel": embed_model,
+                    "vectorStoreType": vector_store_type,
+                },
+                timeout=20,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                st.session_state.kb_id = data.get("kbId")
+                st.session_state.file_id = None
+                st.session_state.parsing_status = "idle"
+                st.success(f"已创建知识库: {data.get('kbName')} (ID: {data.get('kbId')})")
+            else:
+                st.error(f"创建失败: {resp.text}")
+        except Exception as e:
+            st.error(f"创建失败: {e}")
+
+    # 3) 选择知识库
+    options = ["-- 请选择 --"]
+    kb_map = {}
+    for it in kb_items:
+        kb_id = it.get("kbId")
+        kb_name = it.get("kbName") or kb_id
+        label = f"{kb_name}  ({kb_id})"
+        options.append(label)
+        kb_map[label] = kb_id
+
+    selected_label = st.selectbox("选择知识库", options)
+    if selected_label != "-- 请选择 --":
+        selected_kb_id = kb_map.get(selected_label)
+        if selected_kb_id and st.session_state.kb_id != selected_kb_id:
+            st.session_state.kb_id = selected_kb_id
+            st.session_state.file_id = None
+            st.session_state.parsing_status = "idle"
+            st.session_state.messages = []
+            st.success(f"已切换到知识库: {selected_kb_id}")
+
+    # 4) 选择知识库内文件
+    kb_files = []
+    if st.session_state.kb_id:
+        try:
+            r = requests.get(f"{api_base}/kb/files", params={"kbId": st.session_state.kb_id}, timeout=10)
+            if r.status_code == 200:
+                kb_files = r.json().get("files", [])
+        except Exception:
+            kb_files = []
+
+    file_options = ["-- 不选择文件 --"]
+    file_map = {}
+    for f in kb_files:
+        fid = f.get("fileId")
+        fname = f.get("fileName") or fid
+        label = f"{fname}  ({fid})"
+        file_options.append(label)
+        file_map[label] = fid
+
+    selected_file_label = st.selectbox("选择文件 (可选)", file_options)
+    if selected_file_label != "-- 不选择文件 --":
+        fid = file_map.get(selected_file_label)
+        if fid and st.session_state.file_id != fid:
+            st.session_state.file_id = fid
+            st.session_state.parsing_status = "idle"
+
+    st.divider()
+    
+    uploaded_file = st.file_uploader("上传文档 (PDF, Excel, CSV)", type=["pdf", "xlsx", "xls", "csv"], help="点击浏览或拖拽文件上传")
+    
+    # 新增：解析方法选择
+    parse_method_map = {"original": "基础解析 (Original)", "olmocr": "增强解析 (OlmOCR)"}
+    parse_method = st.radio(
+        "解析方法", 
+        ["original", "olmocr"], 
+        format_func=lambda x: parse_method_map[x],
+        captions=["传统方法 (Unstructured + PaddleOCR)", "多模态大模型 (OlmOCR)"]
+    )
+
+    if uploaded_file:
+        if st.button("上传并解析"):
+            with st.spinner("正在上传..."):
+                try:
+                    if not st.session_state.kb_id:
+                        st.error("请先在上方选择或新建一个知识库")
+                        st.stop()
+
+                    # Determine mime type
+                    mime_type = "application/octet-stream"
+                    if uploaded_file.name.endswith(".pdf"):
+                        mime_type = "application/pdf"
+                    elif uploaded_file.name.endswith(".xlsx"):
+                        mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    elif uploaded_file.name.endswith(".xls"):
+                        mime_type = "application/vnd.ms-excel"
+                    elif uploaded_file.name.endswith(".csv"):
+                        mime_type = "text/csv"
+                        
+                    files = {"file": (uploaded_file.name, uploaded_file, mime_type)}
+                    resp = requests.post(
+                        f"{api_base}/pdf/upload",
+                        files=files,
+                        data={"kbId": st.session_state.kb_id},
+                        timeout=120,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        st.session_state.kb_id = data.get("kbId") or st.session_state.kb_id
+                        st.session_state.file_id = data["fileId"]
+                        st.success(f"上传成功! File ID: {data['fileId']}")
+                        
+                        # 触发解析
+                        parse_resp = requests.post(f"{api_base}/pdf/parse", json={
+                            "kbId": st.session_state.kb_id,
+                            "fileId": st.session_state.file_id,
+                            "method": parse_method
+                        })
+                        if parse_resp.status_code == 200:
+                            st.session_state.parsing_status = "parsing"
+                            st.info(f"解析任务已提交 (方法: {parse_method})...")
+                        else:
+                            st.error(f"解析请求失败: {parse_resp.text}")
+                    else:
+                        st.error(f"上传失败: {resp.text}")
+                except Exception as e:
+                    st.error(f"发生错误: {e}")
+
+    # 状态轮询与索引构建
+    if st.session_state.kb_id:
+        st.markdown(f"**当前知识库 ID:** `{st.session_state.kb_id}`")
+
+    if st.session_state.kb_id and st.session_state.file_id:
+        st.markdown(f"**当前文件 ID:** `{st.session_state.file_id}`")
+        
+        if st.button("刷新状态"):
+            try:
+                status_resp = requests.get(
+                    f"{api_base}/pdf/status",
+                    params={"kbId": st.session_state.kb_id, "fileId": st.session_state.file_id},
+                )
+                if status_resp.status_code == 200:
+                    status_data = status_resp.json()
+                    st.session_state.parsing_status = status_data["status"]
+                    progress = status_data.get("progress", 0)
+                    st.progress(progress / 100)
+                    st.write(f"状态: {status_data['status']}")
+                else:
+                    st.error("获取状态失败")
+            except Exception as e:
+                st.error(f"连接错误: {e}")
+
+        if st.session_state.parsing_status == "ready":
+            if st.button("构建索引 (Build Index)"):
+                with st.spinner("正在构建索引..."):
+                    try:
+                        idx_resp = requests.post(
+                            f"{api_base}/index/build",
+                            json={"kbId": st.session_state.kb_id, "fileId": st.session_state.file_id},
+                        )
+                        if idx_resp.status_code == 200:
+                            st.success("索引构建成功！现在可以开始对话了。")
+                        else:
+                            st.error(f"索引构建失败: {idx_resp.text}")
+                    except Exception as e:
+                        st.error(f"错误: {e}")
+
+# 主界面 Tabs
+tab4, tab5 = st.tabs(["🔍 多模态搜索", "📚 知识库预览"])
+#tab1, tab2, tab3, tab4, tab5 = st.tabs(["💬 对话", "📄 文档查看", "🖼️ 提取图片", "🔍 调试搜索", "📚 知识库预览"])
+# --- Tab 1: 对话 ---
+# with tab1:
+#     st.header("多模态 RAG 对话 (全局知识库)")
+#     st.caption("当前对话将检索知识库中所有已索引的文件。")
+    
+#     # 辅助函数：显示引用
+#     def render_citations(citations, api_base_url):
+#         if not citations:
+#             return
+#         with st.expander("📚 参考引用 (点击查看原文)"):
+#             for c in citations:
+#                 page = c.get("page")
+#                 score = c.get("score")
+#                 text = c.get("snippet", "")
+#                 preview_url = c.get("previewUrl", "")
+                
+#                 # 构建完整 URL
+#                 full_url = preview_url
+#                 if preview_url.startswith("/"):
+#                     # 尝试从 api_base 提取 host
+#                     # api_base 如 http://localhost:8000/api/v1
+#                     if "/api/v1" in api_base_url:
+#                         host = api_base_url.split("/api/v1")[0]
+#                         full_url = host + preview_url
+#                     else:
+#                         # 简单拼接
+#                         full_url = api_base_url.rstrip("/") + preview_url
+
+#                 st.markdown(f"**📄 Page {page}** (相似度: {score:.2f})")
+#                 st.markdown(f"🔗 [点击查看原文页面]({full_url})")
+#                 st.caption(text[:200] + "..." if len(text) > 200 else text)
+#                 st.divider()
+
+#     # 显示历史消息
+#     for msg in st.session_state.messages:
+#         with st.chat_message(msg["role"]):
+#             st.markdown(msg["content"])
+#             if "citations" in msg and msg["citations"]:
+#                 render_citations(msg["citations"], api_base)
+
+#     # 输入框
+#     if prompt := st.chat_input("请输入关于文档的问题..."):
+#         # 添加用户消息
+#         st.session_state.messages.append({"role": "user", "content": prompt})
+#         with st.chat_message("user"):
+#             st.markdown(prompt)
+
+#         # 请求后端流式响应
+#         with st.chat_message("assistant"):
+#             message_placeholder = st.empty()
+#             full_response = ""
+#             citations = []
+            
+#             try:
+#                 payload = {
+#                     "message": prompt,
+#                     "sessionId": st.session_state.session_id,
+#                     "pdfFileId": st.session_state.file_id
+#                 }
+                
+#                 with requests.post(f"{api_base}/chat", json=payload, stream=True) as r:
+#                     if r.status_code == 200:
+#                         for line in r.iter_lines():
+#                             if line:
+#                                 decoded_line = line.decode('utf-8')
+#                                 if decoded_line.startswith("event:"):
+#                                     event_type = decoded_line.split(":", 1)[1].strip()
+#                                 elif decoded_line.startswith("data:"):
+#                                     data_str = decoded_line.split(":", 1)[1].strip()
+#                                     try:
+#                                         data_json = json.loads(data_str)
+                                        
+#                                         if event_type == "token":
+#                                             token_text = data_json.get("text", "")
+#                                             full_response += token_text
+                                            
+#                                             # 实时替换图片路径为完整的 API URL
+#                                             # 使用正则进行更稳健的替换
+#                                             if "/api/v1" in api_base:
+#                                                 api_root = api_base.split("/api/v1")[0]
+#                                             else:
+#                                                 api_root = api_base.rstrip("/")
+                                            
+#                                             display_response = re.sub(r'\]\(\s*/api/v1/', f']({api_root}/api/v1/', full_response)
+#                                             display_response = re.sub(r'src="\s*/api/v1/', f'src="{api_root}/api/v1/', display_response)
+                                            
+#                                             message_placeholder.markdown(display_response + "▌")
+                                            
+#                                         elif event_type == "citation":
+#                                             citations.append(data_json)
+                                            
+#                                         elif event_type == "error":
+#                                             st.error(f"后端错误: {data_json.get('message')}")
+#                                     except json.JSONDecodeError:
+#                                         st.error("无法解析后端数据")
+#                         # 最终显示也需要替换
+#                         if "/api/v1" in api_base:
+#                             api_root = api_base.split("/api/v1")[0]
+#                         else:
+#                             api_root = api_base.rstrip("/")
+                            
+#                         final_display_response = re.sub(r'\]\(\s*/api/v1/', f']({api_root}/api/v1/', full_response)
+#                         final_display_response = re.sub(r'src="\s*/api/v1/', f'src="{api_root}/api/v1/', final_display_response)
+                        
+#                         # 最终显示也需要替换
+#                         if "/api/v1" in api_base:
+#                             api_root = api_base.split("/api/v1")[0]
+#                         else:
+#                             api_root = api_base.rstrip("/")
+                            
+#                         final_display_response = re.sub(r'\]\(\s*/api/v1/', f']({api_root}/api/v1/', full_response)
+#                         final_display_response = re.sub(r'src="\s*/api/v1/', f'src="{api_root}/api/v1/', final_display_response)
+                        
+#                         message_placeholder.markdown(final_display_response)
+#                         # 保存助手回复
+#                         st.session_state.messages.append({
+#                             "role": "assistant", 
+#                             "content": final_display_response, # 保存替换后的内容，以便历史记录正确显示
+#                             "citations": citations
+#                         })
+                        
+#                         if citations:
+#                             render_citations(citations, api_base)
+#                     else:
+#                         st.error(f"API 请求失败: {r.status_code}")
+#             except Exception as e:
+#                 st.error(f"发生异常: {e}")
+
+# # --- Tab 2: 文档查看 ---
+# with tab2:
+#     st.header("文档可视化")
+#     if st.session_state.file_id:
+#         col1, col2 = st.columns([1, 3])
+#         with col1:
+#             page_num = st.number_input("页码", min_value=1, value=1)
+        
+#         col_orig, col_parsed = st.columns(2)
+        
+#         with col_orig:
+#             st.subheader("原始页面")
+#             orig_url = f"{api_base}/pdf/page?fileId={st.session_state.file_id}&page={page_num}&type=original"
+#             # 使用 st.image 直接加载 URL (如果后端支持跨域且可访问)
+#             # 或者下载后显示
+#             try:
+#                 st.image(orig_url, use_container_width=True)
+#             except:
+#                 st.warning("无法加载原始页面")
+
+#         with col_parsed:
+#             st.subheader("解析后 (带框)")
+#             if st.session_state.parsing_status == "ready":
+#                 parsed_url = f"{api_base}/pdf/page?fileId={st.session_state.file_id}&page={page_num}&type=parsed"
+#                 try:
+#                     st.image(parsed_url, use_container_width=True)
+#                 except:
+#                     st.warning("无法加载解析页面")
+#             else:
+#                 st.info("文档尚未解析完成")
+#     else:
+#         st.info("请先上传文件")
+
+# # --- Tab 3: 提取图片 ---
+# with tab3:
+#     st.header("提取的图片与表格")
+#     if st.session_state.file_id and st.session_state.parsing_status == "ready":
+#         if st.button("加载图片列表"):
+#             try:
+#                 resp = requests.get(f"{api_base}/pdf/images_list", params={"fileId": st.session_state.file_id})
+#                 if resp.status_code == 200:
+#                     images = resp.json().get("images", [])
+#                     if images:
+#                         st.success(f"共找到 {len(images)} 张图片/表格截图")
+                        
+#                         # 使用网格布局显示图片
+#                         cols = st.columns(3)
+#                         for idx, img_name in enumerate(images):
+#                             img_url = f"{api_base}/pdf/images?fileId={st.session_state.file_id}&imagePath={img_name}"
+#                             with cols[idx % 3]:
+#                                 st.image(img_url, caption=img_name, use_container_width=True)
+#                     else:
+#                         st.info("未提取到任何图片或表格。")
+#                 else:
+#                     st.error("获取图片列表失败")
+#             except Exception as e:
+#                 st.error(f"错误: {e}")
+#     elif not st.session_state.file_id:
+#         st.info("请先上传文件")
+#     else:
+#         st.info("请等待解析完成")
+
+# --- Tab 4: 调试搜索 ---
+with tab4:
+    st.header("向量索引搜索")
+    query = st.text_input("搜索关键词")
+    k = st.slider("Top K", 1, 10, 3)
+
+    if not st.session_state.kb_id:
+        st.info("请先在左侧选择一个知识库")
+        st.stop()
+
+    # 获取当前 KB 文件列表用于下拉选择
+    kb_files_search = []
+    try:
+        r = requests.get(f"{api_base}/kb/files", params={"kbId": st.session_state.kb_id}, timeout=10)
+        if r.status_code == 200:
+            kb_files_search = r.json().get("files", [])
+    except Exception:
+        kb_files_search = []
+
+    file_options = ["当前知识库 (All files)"] + [f["fileId"] for f in kb_files_search]
+
+    default_idx = 0
+    if st.session_state.file_id and st.session_state.file_id in file_options:
+        default_idx = file_options.index(st.session_state.file_id)
+
+    selected_option = st.selectbox("选择搜索范围", file_options, index=default_idx)
+    
+    if st.button("搜索"):
+        try:
+            payload = {
+                "query": query,
+                "k": k,
+                "kbId": st.session_state.kb_id,
+            }
+
+            if selected_option != "当前知识库 (All files)":
+                payload["fileId"] = selected_option
+            
+            resp = requests.post(f"{api_base}/index/search", json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results", [])
+                if not results:
+                    st.info("未找到相关结果")
+                else:
+                    for i, res in enumerate(results):
+                        score = res.get("score", 0)
+                        res_file_id = res.get("entity_key", "Unknown")
+                        chunk_text = res.get("chunk_text", "")
+                        source_meta = res.get("source", "")
+                        
+                        # 动态替换图片链接，使其指向后端 API
+                        def replace_img_url(match):
+                            rel_path = match.group(1) # e.g. ./images/page26_img1.png
+                            img_name = os.path.basename(rel_path)
+                            # 对图片名进行 URL 编码，处理中文和空格
+                            img_name_encoded = urllib.parse.quote(img_name)
+                            base = api_base.rstrip('/')
+                            return f"![Image]({base}/pdf/images?kbId={st.session_state.kb_id}&fileId={res_file_id}&imagePath={img_name_encoded})"
+                        
+                        # 替换 Markdown 图片语法
+                        chunk_text_display = re.sub(r'!\[.*?\]\((.*?)\)', replace_img_url, chunk_text)
+                        
+                        with st.expander(f"Result {i+1} | Score: {score:.4f} | File: {res_file_id}", expanded=True):
+                            # 尝试检测是否为结构化数据 (Excel/CSV 行)
+                            # 特征：包含 "工作表:" 和 "行号:"
+                            if "工作表:" in chunk_text and "行号:" in chunk_text:
+                                try:
+                                    # 解析 Key-Value
+                                    data_dict = {}
+                                    for line in chunk_text.split('\n'):
+                                        if ": " in line:
+                                            k, v = line.split(": ", 1)
+                                            data_dict[k] = v
+                                    
+                                    # 展示为表格
+                                    if data_dict:
+                                        st.markdown("#### 📊 结构化数据匹配")
+                                        # 转置显示，适合单行数据查看
+                                        df_row = pd.DataFrame([data_dict]).T
+                                        df_row.columns = ["值"]
+                                        st.dataframe(df_row, use_container_width=True)
+                                    else:
+                                        st.markdown(chunk_text_display)
+                                except:
+                                    st.markdown(chunk_text_display)
+                            else:
+                                st.markdown(chunk_text_display)
+
+                            st.divider()
+                            st.caption(f"Source Metadata: {source_meta}")
+            else:
+                st.error(f"搜索失败: {resp.text}")
+        except Exception as e:
+            st.error(f"错误: {e}")
+
+# --- Tab 5: 知识库预览 ---
+with tab5:
+    st.header("📚 知识库预览")
+    
+    # 顶部标签
+    preview_tabs = st.tabs(["� 整体文件预览", "�️ 图片预览", "� 文本信息预览", "📊 数值信息预览"])
+    
+    if not st.session_state.kb_id:
+        st.info("请先在左侧选择一个知识库")
+        st.stop()
+
+    # 获取当前 KB 的文件列表
+    kb_files = []
+    try:
+        kb_resp = requests.get(f"{api_base}/kb/files", params={"kbId": st.session_state.kb_id})
+        if kb_resp.status_code == 200:
+            kb_files = kb_resp.json().get("files", [])
+    except Exception:
+        st.error("连接后端失败")
+
+    # 1. 整体文件预览
+    with preview_tabs[0]:
+        if not kb_files:
+            st.info("知识库为空")
+        else:
+            col_list, col_view = st.columns([1, 3])
+            with col_list:
+                st.markdown("### 文件列表")
+                # 构造 DataFrame 用于显示（虽然 radio 更简单，但用户要求列表形式）
+                # 这里用 radio 模拟列表选择，因为点击即可看内容
+                file_options = [f"{f.get('fileName') or f.get('fileId')}  ({f.get('fileId')})" for f in kb_files]
+                selected_label = st.radio("选择文件查看", file_options, label_visibility="collapsed")
+
+                selected_file = None
+                if selected_label and "(" in selected_label and selected_label.endswith(")"):
+                    selected_file = selected_label.split("(")[-1].rstrip(")")
+            
+            with col_view:
+                if selected_file:
+                    st.markdown(f"### 📄 {selected_file}")
+                    
+                    # 找到选中文件的元数据
+                    selected_file_meta = next((f for f in kb_files if f["fileId"] == selected_file), None)
+                    page_count = selected_file_meta.get("pageCount", 0) if selected_file_meta else 0
+                    is_indexed = selected_file_meta.get("isIndexed", False) if selected_file_meta else False
+                    file_name = selected_file_meta.get("fileName", "") if selected_file_meta else ""
+                    file_type = selected_file_meta.get("type", "") if selected_file_meta else ""
+                    
+                    # 显示索引状态与操作面板
+                    st.markdown("#### 📊 状态与操作")
+                    
+                    # 状态显示
+                    if is_indexed:
+                        st.success(f"✅ 已构建索引 (页数: {page_count})")
+                    else:
+                        st.warning(f"❌ 未构建索引 (页数: {page_count})")
+                    
+                    st.divider()
+
+                    # 1. 解析与索引构建区域
+                    st.markdown("##### 🛠️ 1. 解析与索引")
+                    
+                    is_excel = (file_type == "excel") or file_name.lower().endswith((".xlsx", ".xls", ".csv"))
+                    
+                    if is_excel:
+                        st.info("💡 Excel/CSV 文件无需OCR解析，直接构建索引即可。")
+                        if st.button("🔨 构建/重建索引 (Excel)", key=f"build_excel_{selected_file}"):
+                            with st.spinner("正在处理表格数据..."):
+                                try:
+                                    r = requests.post(
+                                        f"{api_base}/index/build",
+                                        json={"kbId": st.session_state.kb_id, "fileId": selected_file},
+                                    )
+                                    if r.status_code == 200:
+                                        data = r.json()
+                                        st.success(f"索引构建成功! 提取了 {data.get('chunks', 0)} 个数据块")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"构建失败: {r.text}")
+                                except Exception as e:
+                                    st.error(f"请求错误: {e}")
+                    else:
+                        # PDF 操作区
+                        col_p1, col_p2 = st.columns([1, 1])
+                        with col_p1:
+                            parse_method = st.selectbox(
+                                "解析模型", 
+                                ["original", "olmocr"], 
+                                index=0,
+                                format_func=lambda x: {"original": "基础解析 (Original)", "olmocr": "增强解析 (OlmOCR)"}[x],
+                                key=f"pm_{selected_file}",
+                                help="基础解析: 传统OCR; 增强解析: 多模态大模型"
+                            )
+                        with col_p2:
+                            st.write("") # Spacer
+                            st.write("")
+                            if st.button("🚀 开始解析 PDF", key=f"parse_pdf_{selected_file}", use_container_width=True):
+                                with st.spinner("正在提交解析任务..."):
+                                    try:
+                                        r = requests.post(
+                                            f"{api_base}/pdf/parse",
+                                            json={
+                                                "kbId": st.session_state.kb_id,
+                                                "fileId": selected_file,
+                                                "method": parse_method,
+                                            },
+                                        )
+                                        if r.status_code == 200:
+                                            st.success("解析任务已提交，正在处理...")
+                                            
+                                            # 进度条显示
+                                            progress_bar = st.progress(0)
+                                            status_text = st.empty()
+                                            
+                                            # 轮询进度
+                                            while True:
+                                                try:
+                                                    r_status = requests.get(
+                                                        f"{api_base}/pdf/status",
+                                                        params={"kbId": st.session_state.kb_id, "fileId": selected_file},
+                                                    )
+                                                    if r_status.status_code == 200:
+                                                        s_data = r_status.json()
+                                                        status = s_data.get("status", "idle")
+                                                        prog = s_data.get("progress", 0)
+                                                        
+                                                        progress_bar.progress(prog)
+                                                        status_text.info(f"当前状态: {status} (进度: {prog}%)")
+                                                        
+                                                        if status == "ready":
+                                                            progress_bar.progress(100)
+                                                            st.success("解析完成！")
+                                                            time.sleep(1)
+                                                            st.rerun()
+                                                            break
+                                                        elif status == "error":
+                                                            st.error("解析过程中发生错误")
+                                                            break
+                                                    else:
+                                                        time.sleep(1)
+                                                except:
+                                                    pass
+                                                time.sleep(1)
+                                        else:
+                                            st.error(f"提交失败: {r.text}")
+                                    except Exception as e:
+                                        st.error(f"请求错误: {e}")
+                        
+                        if st.button("🔨 构建索引 (解析完成后点击)", key=f"build_pdf_{selected_file}"):
+                             with st.spinner("正在构建索引..."):
+                                try:
+                                    r = requests.post(
+                                        f"{api_base}/index/build",
+                                        json={"kbId": st.session_state.kb_id, "fileId": selected_file},
+                                    )
+                                    if r.status_code == 200:
+                                        st.success("索引构建成功！")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"构建失败: {r.text}")
+                                except Exception as e:
+                                    st.error(f"请求错误: {e}")
+
+                    st.divider()
+
+
+                    # 2. 删除管理区域
+                    st.markdown("##### 🗑️ 2. 删除管理")
+                    col_d1, col_d2 = st.columns([2, 1])
+                    with col_d1:
+                        del_option = st.selectbox(
+                            "删除范围", 
+                            ["仅删除索引", "删除文件及索引"], 
+                            key=f"del_opt_{selected_file}"
+                        )
+                    with col_d2:
+                        st.write("") # Spacer
+                        st.write("")
+                        if st.button("⚠️ 确认删除", type="primary", key=f"del_confirm_{selected_file}", use_container_width=True):
+                            delete_index_flag = True
+                            delete_file_flag = (del_option == "删除文件及索引")
+                            
+                            with st.spinner("正在执行删除操作..."):
+                                try:
+                                    payload = {
+                                        "kbId": st.session_state.kb_id,
+                                        "fileId": selected_file,
+                                        "deleteIndex": delete_index_flag,
+                                        "deleteFile": delete_file_flag
+                                    }
+                                    r = requests.post(f"{api_base}/kb/file/delete", json=payload)
+                                    if r.status_code == 200:
+                                        st.success("删除成功！")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"删除失败: {r.text}")
+                                except Exception as e:
+                                    st.error(f"请求错误: {e}")
+                                
+                    if is_excel:
+                        st.info("当前文件存储为数值信息，请查看数值信息")
+                    elif page_count > 0:
+                        # 视图切换
+                        view_mode = st.radio(
+                            "页面视图", 
+                            ["原始页面", "解析布局 (带框)"], 
+                            horizontal=True,
+                            key=f"vm_{selected_file}",
+                            help="解析布局仅在 'original' 模式解析后可用"
+                        )
+                        
+                        # 使用 scrollable container
+                        with st.container(height=800):
+                            for p in range(1, page_count + 1):
+                                st.caption(f"第 {p} 页")
+                                
+                                img_type = "original"
+                                if view_mode == "解析布局 (带框)":
+                                    img_type = "parsed"
+                                    
+                                img_url = f"{api_base}/pdf/page?kbId={st.session_state.kb_id}&fileId={selected_file}&page={p}&type={img_type}"
+                                
+                                # 尝试加载图片，如果 parsed 不存在 (比如未解析或 olmocr)，前端会显示 broken image
+                                # 改为后端获取 content，解决跨域/localhost 问题
+                                try:
+                                    img_resp = requests.get(img_url)
+                                    if img_resp.status_code == 200:
+                                        st.image(img_resp.content, use_container_width=True)
+                                    else:
+                                        st.warning(f"无法加载页面 (Status: {img_resp.status_code})")
+                                except Exception as e:
+                                    st.error(f"加载失败: {e}")
+                                st.divider()
+                    else:
+                        st.warning("该文件似乎没有解析出页面图片，请检查解析状态。")
+                    
+                    st.divider()
+                    
+
+    # 2. 图片预览
+    with preview_tabs[1]:
+        if st.button("加载/刷新图片列表"):
+            all_images = []
+            with st.spinner("正在扫描所有文件的图片及摘要..."):
+                for f in kb_files:
+                    fid = f["fileId"]
+                    try:
+                        # 1. 获取图片列表
+                        r_imgs = requests.get(
+                            f"{api_base}/pdf/images_list",
+                            params={"kbId": st.session_state.kb_id, "fileId": fid},
+                        )
+                        imgs = []
+                        if r_imgs.status_code == 200:
+                            imgs = r_imgs.json().get("images", [])
+                        
+                        # 2. 获取摘要列表
+                        r_sums = requests.get(
+                            f"{api_base}/pdf/image_summaries",
+                            params={"kbId": st.session_state.kb_id, "fileId": fid},
+                        )
+                        summaries_map = {}
+                        if r_sums.status_code == 200:
+                            s_list = r_sums.json().get("summaries", [])
+                            for s in s_list:
+                                summaries_map[s["img_name"]] = s
+
+                        for img in imgs:
+                            # 构造完整 URL
+                            img_name_encoded = urllib.parse.quote(img)
+                            img_url = f"{api_base}/pdf/images?kbId={st.session_state.kb_id}&fileId={fid}&imagePath={img_name_encoded}"
+                            
+                            # 获取图片内容并转为 Base64，解决跨域/localhost 问题
+                            display_img = img_url # Fallback
+                            try:
+                                r_img_content = requests.get(img_url)
+                                if r_img_content.status_code == 200:
+                                    b64_img = base64.b64encode(r_img_content.content).decode('utf-8')
+                                    display_img = f"data:image/png;base64,{b64_img}"
+                            except:
+                                pass
+                            
+                            summary_obj = summaries_map.get(img, {})
+                            desc = summary_obj.get("summary", "")
+                            page_num = summary_obj.get("page_num", 0)
+                            
+                            # 尝试从文件名解析页码 (如果摘要中没有)
+                            if page_num == 0:
+                                try:
+                                    # 假设 page1_img1.png 或 page-0001.png
+                                    if "page" in img:
+                                        p_str = img.split("page")[1]
+                                        if "_" in p_str:
+                                            page_num = int(p_str.split("_")[0])
+                                        elif "-" in p_str:
+                                            page_num = int(p_str.split("-")[1].split(".")[0])
+                                except:
+                                    pass
+
+                            all_images.append({
+                                "图片": display_img,
+                                "图片名称": img,
+                                "出自文件": fid,
+                                "描述": desc,
+                                "页码": page_num
+                            })
+                    except Exception as e:
+                        pass
+            
+            if all_images:
+                st.session_state.all_images_df = pd.DataFrame(all_images)
+            else:
+                st.session_state.all_images_df = pd.DataFrame()
+        
+        if "all_images_df" in st.session_state and not st.session_state.all_images_df.empty:
+            st.info("您可以直接在表格中修改“描述”列，然后点击下方的“保存修改”按钮。")
+            
+            edited_df = st.data_editor(
+                st.session_state.all_images_df,
+                column_config={
+                    "图片": st.column_config.ImageColumn("图片", help="预览图", width="medium"),
+                    "图片名称": st.column_config.TextColumn("图片名称", disabled=True),
+                    "出自文件": st.column_config.TextColumn("出自文件", disabled=True),
+                    "描述": st.column_config.TextColumn("描述", width="large"),
+                    "页码": st.column_config.NumberColumn("页码", disabled=True)
+                },
+                use_container_width=True,
+                height=600,
+                key="img_editor"
+            )
+            
+            if st.button("💾 保存修改并更新索引"):
+                with st.spinner("正在保存并重建索引..."):
+                    grouped = edited_df.groupby("出自文件")
+                    success_count = 0
+                    total_files = len(grouped)
+                    
+                    for fid, group in grouped:
+                        summaries_to_update = []
+                        for _, row in group.iterrows():
+                            summaries_to_update.append({
+                                "img_name": row["图片名称"],
+                                "summary": row["描述"],
+                                "page_num": int(row["页码"]) if pd.notnull(row["页码"]) else 0
+                            })
+                        
+                        payload = {
+                            "kbId": st.session_state.kb_id,
+                            "fileId": fid,
+                            "summaries": summaries_to_update
+                        }
+                        
+                        try:
+                            r = requests.post(f"{api_base}/pdf/image_summaries/update", json=payload)
+                            if r.status_code == 200:
+                                success_count += 1
+                            else:
+                                st.error(f"文件 {fid} 更新失败: {r.text}")
+                        except Exception as e:
+                            st.error(f"文件 {fid} 请求错误: {e}")
+                            
+                    if success_count == total_files and total_files > 0:
+                        st.success("所有更改已保存，索引已更新！")
+        else:
+            st.info("点击上方按钮加载图片列表")
+
+    # 3. 文本信息预览
+    with preview_tabs[2]:
+        if not kb_files:
+            st.info("知识库为空")
+        else:
+            col_t1, col_t2 = st.columns([1, 3])
+            with col_t1:
+                st.markdown("### 文件列表")
+                file_options_t = [f"{f.get('fileName') or f.get('fileId')}  ({f.get('fileId')})" for f in kb_files]
+                selected_label_t = st.radio("选择文件查看文本", file_options_t, label_visibility="collapsed", key="radio_text")
+
+                selected_file_t = None
+                if selected_label_t and "(" in selected_label_t and selected_label_t.endswith(")"):
+                    selected_file_t = selected_label_t.split("(")[-1].rstrip(")")
+            
+            with col_t2:
+                if selected_file_t:
+                    st.markdown(f"### 📝 {selected_file_t}")
+                    
+                    selected_file_meta = next((f for f in kb_files if f["fileId"] == selected_file_t), None)
+                    file_type = selected_file_meta.get("type", "") if selected_file_meta else ""
+                    file_name = selected_file_meta.get("fileName", "") if selected_file_meta else ""
+
+                    if (file_type == "excel") or file_name.lower().endswith((".xlsx", ".xls", ".csv")):
+                        st.info("当前文件存储为数值信息，请查看数值信息")
+                    else:
+                        try:
+                            r = requests.get(
+                                f"{api_base}/kb/file/content",
+                                params={"kbId": st.session_state.kb_id, "fileId": selected_file_t},
+                            )
+                            if r.status_code == 200:
+                                content = r.json().get("content", "")
+                                st.text_area("Markdown 内容", content, height=600)
+                            else:
+                                st.error("无法获取内容")
+                        except Exception as e:
+                            st.error(f"错误: {e}")
+
+    # 4. 数值信息预览
+    with preview_tabs[3]:
+        if not kb_files:
+            st.info("知识库为空")
+        else:
+            # Filter for Excel/CSV files
+            excel_files = [
+                f
+                for f in kb_files
+                if f.get("type") == "excel" or (f.get("fileName", "").lower().endswith((".xlsx", ".xls", ".csv")))
+            ]
+            
+            if not excel_files:
+                st.info("暂无结构化数据文件 (Excel/CSV)")
+            else:
+                col_d1, col_d2 = st.columns([1, 3])
+                with col_d1:
+                    st.markdown("### 表格文件列表")
+                    file_options_d = [f"{f.get('fileName') or f.get('fileId')}  ({f.get('fileId')})" for f in excel_files]
+                    selected_label_d = st.radio(
+                        "选择文件查看数据",
+                        file_options_d,
+                        label_visibility="collapsed",
+                        key="radio_data",
+                    )
+
+                    selected_file_d = None
+                    if selected_label_d and "(" in selected_label_d and selected_label_d.endswith(")"):
+                        selected_file_d = selected_label_d.split("(")[-1].rstrip(")")
+                
+                with col_d2:
+                    if selected_file_d:
+                        st.markdown(f"### 📊 {selected_file_d}")
+                        try:
+                            r = requests.get(
+                                f"{api_base}/kb/file/dataframe",
+                                params={"kbId": st.session_state.kb_id, "fileId": selected_file_d},
+                            )
+                            if r.status_code == 200:
+                                resp_data = r.json()
+                                sheets = resp_data.get("sheets", {})
+                                
+                                if not sheets:
+                                    # 兼容旧接口或无数据
+                                    data = resp_data.get("data", [])
+                                    if data:
+                                        sheets = {"Sheet1": data}
+                                
+                                if sheets:
+                                    # 如果有多个工作表，提供选择
+                                    sheet_names = list(sheets.keys())
+                                    selected_sheet = sheet_names[0]
+                                    
+                                    if len(sheet_names) > 1:
+                                        selected_sheet = st.selectbox("选择工作表", sheet_names, key="sheet_selector")
+                                    
+                                    st.markdown(f"#### 📄 {selected_sheet}")
+                                    sheet_data = sheets[selected_sheet]
+                                    if sheet_data:
+                                        df = pd.DataFrame(sheet_data)
+                                        # 强制转换为字符串以避免 PyArrow 类型错误 (混合类型列)
+                                        df = df.astype(str)
+                                        st.dataframe(df, use_container_width=True, height=600)
+                                    else:
+                                        st.info("该工作表为空")
+                                else:
+                                    st.info("该文件没有数据")
+                            else:
+                                st.error(f"无法获取数据: {r.text}")
+                        except Exception as e:
+                            st.error(f"错误: {e}")

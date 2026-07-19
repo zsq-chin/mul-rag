@@ -1,0 +1,25 @@
+.json-modal .json-content .highlight {
+  background-color: rgba(237, 38, 38, 0.5);
+  padding: 2px 0;
+  border-radius: 2px;
+  transition: all 0.3s ease;
+}
+.json-modal .json-content .active-highlight {
+  background-color: brown !important;
+  color: white !important;
+  padding: 2px 4px;
+  border-radius: 4px;
+  position: relative;
+  z-index: 1;
+  font-weight: bold;
+  animation: pulse 0.5s ease-in-out;
+  display: inline-block !important;
+}
+@keyframes pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+.json-modal .json-content .highlight-animate {
+  animation: pulse 0.5s ease-in-out;
+}

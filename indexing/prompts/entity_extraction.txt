@@ -1,0 +1,120 @@
+-目标-
+给定一个可能与此活动相关的文本文件和一个实体类型列表，从文本中识别出所有这些类型的实体以及这些实体之间的所有关系。
+
+-步骤-
+
+识别所有实体。对于每个识别出的实体，提取以下信息：
+
+实体名称：实体的名称，需使用中文
+
+实体类型：以下类型之一：[ SYSTEM, DEVICE ]。
+重点关注知识内容实体，如系统、装置、工艺过程、技术与功能性概念，避免提取人物、组织、地点等非知识内容实体。
+
+实体描述：对实体属性、定义、应用或作用的全面描述，侧重于工程与技术知识内容。
+将每个实体格式化为 ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_description>)
+
+从步骤1中识别的实体中，识别出所有明确相关的 (source_entity, target_entity) 对。
+对于每对相关实体，提取以下信息：
+
+源实体：步骤1中识别出的源实体名称
+
+目标实体：步骤1中识别出的目标实体名称
+
+关系描述：解释为什么认为源实体和目标实体之间存在关系，重点关注知识层面的关系，如组成、依赖、连接、输送、控制等，且关系表述限制为四个字以内
+
+关系强度：一个表示源实体和目标实体之间关系强度的数值评分（基于文本中关系的明确程度）
+将每个关系格式化为 ("relationship"{tuple_delimiter}<source_entity>{tuple_delimiter}<target_entity>{tuple_delimiter}<relationship_description>{tuple_delimiter}<relationship_strength>)
+
+使用 {record_delimiter} 作为列表分隔符，以单个列表的形式返回步骤1和步骤2中识别的所有实体和关系。
+
+完成后，输出 {completion_delimiter}
+
+######################
+-示例-
+######################
+实体类型: SYSTEM, DEVICE
+文本:
+集输系统：包括井口装置、集油管网、分离站、计量装置等。
+######################
+输出:
+("entity"{tuple_delimiter}集输系统{tuple_delimiter}SYSTEM{tuple_delimiter}集输系统包括井口装置、集油管网、分离站、计量装置等，用于将井口产物输送至处理站)
+{record_delimiter}
+("entity"{tuple_delimiter}井口装置{tuple_delimiter}DEVICE{tuple_delimiter}井口装置连接地面管网，保证生产安全)
+{record_delimiter}
+("entity"{tuple_delimiter}集油管网{tuple_delimiter}DEVICE{tuple_delimiter}集油管网输送井口产物，保证生产安全)
+{record_delimiter}
+("entity"{tuple_delimiter}分离站{tuple_delimiter}DEVICE{tuple_delimiter}分离站用于处理井口产物，保证生产安全)
+{record_delimiter}
+("entity"{tuple_delimiter}计量装置{tuple_delimiter}DEVICE{tuple_delimiter}计量装置用于测量井口产物的数量，保证生产安全)
+{record_delimiter}
+("relationship"{tuple_delimiter}井口装置{tuple_delimiter}集输系统{tuple_delimiter}组成{tuple_delimiter}9)
+{record_delimiter}
+("relationship"{tuple_delimiter}集油管网{tuple_delimiter}集输系统{tuple_delimiter}组成{tuple_delimiter}9)
+{record_delimiter}
+("relationship"{tuple_delimiter}分离站{tuple_delimiter}集输系统{tuple_delimiter}组成{tuple_delimiter}9)
+{record_delimiter}
+("relationship"{tuple_delimiter}计量装置{tuple_delimiter}集输系统{tuple_delimiter}组成{tuple_delimiter}9)
+{completion_delimiter}
+
+
+######################
+示例 2:
+实体类型: SYSTEM, DEVICE
+文本:
+处理系统：由一次分离装置、加热炉、脱水脱盐装置、稳定装置等组成。
+######################
+输出:
+("entity"{tuple_delimiter}处理系统{tuple_delimiter}SYSTEM{tuple_delimiter}处理系统由一次分离装置、加热炉、脱水脱盐装置、稳定装置等组成)
+{record_delimiter}
+("entity"{tuple_delimiter}加热炉{tuple_delimiter}DEVICE{tuple_delimiter}加热炉是处理系统的组成部分)
+{record_delimiter}
+("entity"{tuple_delimiter}脱水脱盐装置{tuple_delimiter}DEVICE{tuple_delimiter}脱水脱盐装置是处理系统的组成部分)
+{record_delimiter}
+("entity"{tuple_delimiter}稳定装置{tuple_delimiter}DEVICE{tuple_delimiter}稳定装置是处理系统的组成部分)
+{record_delimiter}
+("relationship"{tuple_delimiter}一次分离装置{tuple_delimiter}处理系统{tuple_delimiter}组成{tuple_delimiter}9)
+{record_delimiter}
+("relationship"{tuple_delimiter}加热炉{tuple_delimiter}处理系统{tuple_delimiter}组成{tuple_delimiter}9)
+{record_delimiter}
+("relationship"{tuple_delimiter}脱水脱盐装置{tuple_delimiter}处理系统{tuple_delimiter}组成{tuple_delimiter}9)
+{record_delimiter}
+("relationship"{tuple_delimiter}稳定装置{tuple_delimiter}处理系统{tuple_delimiter}组成{tuple_delimiter}9)
+{completion_delimiter}
+
+######################
+示例 3:
+实体类型: DEVICE
+文本:
+井口装置与集油管网之间为输送关系。
+######################
+输出:
+("entity"{tuple_delimiter}井口装置{tuple_delimiter}DEVICE{tuple_delimiter}井口装置负责连接地面管网并保证生产安全)
+{record_delimiter}
+("entity"{tuple_delimiter}集油管网{tuple_delimiter}DEVICE{tuple_delimiter}集油管网则负责将井口产物输送至集中处理站)
+{record_delimiter}
+("relationship"{tuple_delimiter}井口装置{tuple_delimiter}集油管网{tuple_delimiter}输送{tuple_delimiter}9)
+{completion_delimiter}
+
+######################
+示例 4:
+实体类型: SYSTEM
+文本:
+电力系统为生产单元提供能源支撑，控制系统负责监控与联锁控制。
+######################
+输出:
+("entity"{tuple_delimiter}电力系统{tuple_delimiter}SYSTEM{tuple_delimiter}电力系统为生产单元提供能源支撑)
+{record_delimiter}
+("entity"{tuple_delimiter}控制系统{tuple_delimiter}SYSTEM{tuple_delimiter}控制系统负责监控与联锁控制)
+{record_delimiter}
+("relationship"{tuple_delimiter}电力系统{tuple_delimiter}控制系统{tuple_delimiter}支撑{tuple_delimiter}7)
+{completion_delimiter}
+
+######################
+-真实数据-
+######################
+实体类型: {entity_types}
+文本: {input_text}
+######################
+输出:
+
+
