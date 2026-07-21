@@ -187,14 +187,14 @@ onMounted(() => {
   gap: 16px;
 
   .new-database {
-    background-color: #F0F3F4;
+    background-color: var(--hover);
   }
 }
 
 .database, .graphbase {
-  background-color: white;
+  background-color: var(--surface-raised);
   box-shadow: 0px 1px 2px 0px rgba(16,24,40,.06),0px 1px 3px 0px rgba(16,24,40,.1);
-  border: 2px solid white;
+  border: 2px solid var(--surface-raised);
   transition: box-shadow 0.2s ease-in-out;
 
   &:hover {
@@ -233,7 +233,7 @@ onMounted(() => {
     .info {
       h3, p {
         margin: 0;
-        color: black;
+        color: var(--text-primary);
       }
 
       h3 {

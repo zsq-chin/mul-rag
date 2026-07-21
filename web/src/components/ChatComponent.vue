@@ -971,7 +971,8 @@ const handleQuestionClick = (question) => {
   display: flex;
   flex-direction: column;
   overflow-x: hidden;
-  background: var(--main-light-7);
+  background: var(--app-bg);
+  color: var(--text-primary);
   position: relative;
   box-sizing: border-box;
   flex: 5 5 200px;
@@ -987,7 +988,7 @@ const handleQuestionClick = (question) => {
     position: sticky;
     top: 0;
     z-index: 10;
-    background-color: rgba(255, 255, 255, 0.9);
+    background-color: color-mix(in srgb, var(--surface) 90%, transparent);
     backdrop-filter: blur(10px);
     height: var(--header-height);
     display: flex;
@@ -1037,8 +1038,8 @@ const handleQuestionClick = (question) => {
 .my-panal {
   position: absolute;
   margin-top: 5px;
-  background-color: white;
-  border: 1px solid #ccc;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border);
   box-shadow: 0px 0px 10px 1px rgba(0, 0, 0, 0.05);
   border-radius: 12px;
   padding: 12px;
@@ -1094,7 +1095,7 @@ const handleQuestionClick = (question) => {
   h1 {
     margin-bottom: 20px;
     font-size: 1.2rem;
-    color: #333;
+    color: var(--text-primary);
   }
 
   .opts {
@@ -1105,7 +1106,7 @@ const handleQuestionClick = (question) => {
 
     .opt__button {
       background-color: var(--gray-200);
-      color: #333;
+      color: var(--text-primary);
       padding: .5rem 1.5rem;
       border-radius: 2rem;
       cursor: pointer;
@@ -1115,7 +1116,7 @@ const handleQuestionClick = (question) => {
 
 
       &:hover {
-        background-color: #f0f1f1;
+        background-color: var(--hover);
         // box-shadow: 0px 0px 10px 1px rgba(0, 0, 0, 0.1);
       }
     }
@@ -1165,7 +1166,7 @@ const handleQuestionClick = (question) => {
     width: 100%;
     max-width: 800px;
     margin: 0 auto;
-    background-color: white;
+    background-color: var(--surface);
     animation: width 0.3s ease-in-out;
 
     &.wide-screen {
@@ -1184,7 +1185,7 @@ const handleQuestionClick = (question) => {
       font-size: small;
       text-align: center;
       padding: 0;
-      color: #ccc;
+      color: var(--text-secondary);
       margin-top: 4px;
       margin-bottom: 0;
       user-select: none;
@@ -1304,7 +1305,7 @@ const handleQuestionClick = (question) => {
 
       &:hover {
         background-color: transparent;
-        color: black;
+        color: var(--text-primary);
       }
 
       .text {

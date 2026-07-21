@@ -561,13 +561,13 @@
       </a-tab-pane>
 
       <a-tab-pane key="extract" tab="⛏️ 知识提取">
-        <div class="extract-container" style="padding: 20px; max-width: 1200px; margin: 0 auto; background: #fff; border-radius: 8px;">
+        <div class="extract-container" style="padding: 20px; max-width: 1200px; margin: 0 auto; background: var(--surface); border-radius: 8px;">
            <div v-if="!extractJobId" class="extract-config-layout">
               <a-alert message="知识提取流: 上传文档 -> 设置提取目标 -> 智能提取 -> 结构化入库" type="info" show-icon style="margin-bottom: 20px;" />
               
               <a-row :gutter="24">
                  <a-col :span="14">
-                    <a-card title="1. 文件与配置" :bordered="false" style="background:#fafafa;">
+                    <a-card title="1. 文件与配置" :bordered="false" style="background: var(--surface-raised);">
                        <a-form layout="vertical">
                           <a-form-item label="上传文件 (PDF/Excel/CSV/TXT)">
                              <a-upload-dragger 
@@ -615,7 +615,7 @@
                     </a-card>
                  </a-col>
                  <a-col :span="10">
-                    <a-card title="2. 目标知识库" :bordered="false" style="background:#fafafa;">
+                    <a-card title="2. 目标知识库" :bordered="false" style="background: var(--surface-raised);">
                         <div style="margin-bottom: 16px;">
                             <a-radio-group v-model:value="extractConfig.kbMode" button-style="solid">
                                <a-radio-button value="existing">现有知识库</a-radio-button>
@@ -655,13 +655,13 @@
                  </a-col>
               </a-row>
               
-              <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee;">
+              <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--border);">
                  <a-button type="primary" size="large" @click="startExtractionJob" :loading="extracting" style="width: 240px; height: 50px; font-size: 18px;">🚀 开始提取</a-button>
               </div>
            </div>
 
            <div v-else class="extract-running-layout">
-               <div class="status-bar" style="margin-bottom: 24px; padding: 20px; background: #fafafa; border-radius: 8px; border: 1px solid #eee;">
+               <div class="status-bar" style="margin-bottom: 24px; padding: 20px; background: var(--surface-raised); border-radius: 8px; border: 1px solid var(--border);">
                   <h3 style="margin-bottom: 20px;">任务处理中: {{ extractJobId }}</h3>
                   <a-steps :current="extractStep">
                      <a-step title="上传与初始化" />
@@ -709,12 +709,12 @@
                           <div style="display: flex; gap: 20px;">
                              <div style="flex: 1;">
                                 <h4>文本上下文</h4>
-                                <a-textarea :value="extractJobInfo.relevant_context" :rows="20" readonly style="background: #f5f5f5;" />
+                                <a-textarea :value="extractJobInfo.relevant_context" :rows="20" readonly style="background: var(--hover);" />
                              </div>
                              <div style="flex: 1; height: 600px; overflow-y: auto;">
                                 <h4>相关页面截图</h4>
                                 <div v-if="!extractJobInfo.relevant_pages || !extractJobInfo.relevant_pages.length">无相关页面定位</div>
-                                <div v-for="p in extractJobInfo.relevant_pages" :key="p" style="margin-bottom: 20px; border: 1px solid #ddd; padding: 5px;">
+                                <div v-for="p in extractJobInfo.relevant_pages" :key="p" style="margin-bottom: 20px; border: 1px solid var(--border); padding: 5px;">
                                    <div style="text-align: center; font-weight: bold; margin-bottom: 5px;">Page {{ p }}</div>
                                    <img :src="getExtractPageUrl(p)" style="max-width: 100%; display: block; margin: 0 auto;" />
                                 </div>
@@ -783,7 +783,7 @@
              <div style="height: 600px; overflow-y: auto;">
                 <div v-for="p in previewFileRecord.pageCount" :key="p" style="margin-bottom: 20px; text-align: center;">
                    <div>Page {{ p }}</div>
-                   <img :src="getPreviewPageUrl(p)" style="max-width: 100%; border: 1px solid #eee;" loading="lazy" />
+                   <img :src="getPreviewPageUrl(p)" style="max-width: 100%; border: 1px solid var(--border);" loading="lazy" />
                 </div>
              </div>
           </a-tab-pane>
@@ -1925,11 +1925,12 @@ onMounted(() => {
 <style scoped>
 .multimodal-container {
   padding: 24px;
-  background: #f0f2f5;
+  background: var(--app-bg);
+  color: var(--text-primary);
   min-height: 100vh;
 }
 .main-tabs {
-  background: #fff;
+  background: var(--surface);
   padding: 16px;
   border-radius: 8px;
 }
@@ -1938,17 +1939,17 @@ onMounted(() => {
 .kb-manage-layout {
   display: flex;
   height: 700px;
-  border: 1px solid #e8e8e8;
+  border: 1px solid var(--border);
 }
 .kb-sidebar {
   width: 250px;
-  border-right: 1px solid #e8e8e8;
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
 }
 .sidebar-header {
   padding: 12px;
-  border-bottom: 1px solid #e8e8e8;
+  border-bottom: 1px solid var(--border);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1968,15 +1969,15 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--border);
 }
 .kb-item:hover, .kb-item.active {
-  background: #e6f7ff;
+  background: var(--hover);
 }
 .kb-icon { font-size: 20px; }
 .kb-info { flex: 1; }
 .kb-name { font-weight: 500; font-size: 14px; }
-.kb-meta { font-size: 12px; color: #999; }
+.kb-meta { font-size: 12px; color: var(--text-secondary); }
 .del-icon { color: #ff4d4f; display: none; }
 .kb-item:hover .del-icon { display: block; }
 
@@ -1993,10 +1994,10 @@ onMounted(() => {
 }
 .kb-id-tag {
   font-size: 12px;
-  background: #eee;
+  background: var(--hover);
   padding: 2px 6px;
   border-radius: 4px;
-  color: #666;
+  color: var(--text-secondary);
   margin-left: 10px;
 }
 
@@ -2009,7 +2010,7 @@ onMounted(() => {
   margin-bottom: 16px;
 }
 .image-total {
-  color: #666;
+  color: var(--text-secondary);
   font-size: 13px;
 }
 .image-grid {
@@ -2032,7 +2033,7 @@ onMounted(() => {
 }
 .img-meta-info {
   font-size: 12px;
-  color: #888;
+  color: var(--text-secondary);
   margin-bottom: 6px;
 }
 .desc-input {
@@ -2057,7 +2058,7 @@ onMounted(() => {
 }
 .image-summary {
   margin-top: 6px;
-  color: #555;
+  color: var(--text-secondary);
   line-height: 1.5;
   white-space: pre-wrap;
 }
@@ -2074,14 +2075,14 @@ onMounted(() => {
 
 .search-panel {
   min-width: 0;
-  border: 1px solid #dfe5eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 18px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .search-condition-panel {
-  background: #fafbfc;
+  background: var(--surface-raised);
 }
 
 .search-panel-header {
@@ -2094,13 +2095,13 @@ onMounted(() => {
 
 .search-panel-header h3 {
   margin: 0;
-  color: #1f2937;
+  color: var(--text-primary);
   font-size: 16px;
   line-height: 1.4;
 }
 
 .search-result-count {
-  color: #6b7280;
+  color: var(--text-secondary);
   font-size: 13px;
 }
 
@@ -2119,7 +2120,7 @@ onMounted(() => {
 }
 
 .search-field > span {
-  color: #4b5563;
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 600;
 }
@@ -2155,14 +2156,14 @@ onMounted(() => {
 .search-result-collapse :deep(.ant-collapse-item) {
   overflow: hidden;
   margin-bottom: 10px;
-  border: 1px solid #e1e7ec;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafb;
+  background: var(--surface-raised);
 }
 
 .search-result-collapse :deep(.ant-collapse-item:last-child) {
   margin-bottom: 0;
-  border-bottom: 1px solid #e1e7ec;
+  border-bottom: 1px solid var(--border);
 }
 
 .search-result-collapse :deep(.ant-collapse-header) {
@@ -2172,12 +2173,12 @@ onMounted(() => {
 }
 
 .search-result-collapse :deep(.ant-collapse-content) {
-  border-top: 1px solid #e1e7ec;
+  border-top: 1px solid var(--border);
 }
 
 .search-result-collapse :deep(.ant-collapse-content-box) {
   padding: 16px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .search-result-summary {
@@ -2187,12 +2188,12 @@ onMounted(() => {
   align-items: center;
   gap: 8px 14px;
   min-width: 0;
-  color: #64748b;
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
 .search-result-summary strong {
-  color: #1f2937;
+  color: var(--text-primary);
   font-size: 14px;
 }
 
@@ -2204,11 +2205,11 @@ onMounted(() => {
   min-width: 0;
   overflow-x: auto;
   overflow-wrap: anywhere;
-  border: 1px solid #e5eaef;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px 16px;
-  background: #fff;
-  color: #273444;
+  background: var(--surface);
+  color: var(--text-primary);
   font-size: 15px;
   line-height: 1.75;
 }
@@ -2221,8 +2222,8 @@ onMounted(() => {
   object-fit: contain;
   border-radius: 8px;
   margin: 12px 0;
-  border: 1px solid #e5eaef;
-  background: #fff;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
   cursor: zoom-in;
 }
 
@@ -2242,15 +2243,15 @@ onMounted(() => {
 
 .result-content :deep(th),
 .result-content :deep(td) {
-  border: 1px solid #dce3e8;
+  border: 1px solid var(--border);
   padding: 8px 10px;
   text-align: left;
   vertical-align: top;
 }
 
 .result-content :deep(th) {
-  background: #f3f6f8;
-  color: #253442;
+  background: var(--hover);
+  color: var(--text-primary);
   font-weight: 600;
 }
 
@@ -2259,11 +2260,11 @@ onMounted(() => {
   gap: 9px;
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid #e1e7ec;
+  border-top: 1px solid var(--border);
 }
 
 .search-result-source > strong {
-  color: #374151;
+  color: var(--text-primary);
   font-size: 13px;
 }
 
@@ -2278,25 +2279,25 @@ onMounted(() => {
   gap: 6px;
   max-width: 100%;
   overflow-wrap: anywhere;
-  border: 1px solid #dfe5eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 5px 9px;
-  background: #f8fafb;
-  color: #5f6f7d;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.4;
 }
 
 .search-source-rows b {
   flex: 0 0 auto;
-  color: #273444;
+  color: var(--text-primary);
 }
 
 .clickable-item {
   cursor: pointer;
 }
 .clickable-item:hover {
-  background: #f0f0f0;
+  background: var(--hover);
 }
 .index-container {
   padding: 20px;
@@ -2311,8 +2312,8 @@ onMounted(() => {
 .index-stats {
   margin-bottom: 16px;
   padding: 16px;
-  background: #fafafa;
-  border: 1px solid #f0f0f0;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
   border-radius: 8px;
 }
 .chunk-preview {
@@ -2328,7 +2329,7 @@ onMounted(() => {
   align-items: center;
   gap: 12px;
   margin-top: 12px;
-  color: #666;
+  color: var(--text-secondary);
 }
 .structured-container {
   padding: 20px;
@@ -2336,9 +2337,9 @@ onMounted(() => {
 .panel-block {
   margin-bottom: 16px;
   padding: 16px;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface-raised);
 }
 .panel-title {
   display: flex;
@@ -2376,7 +2377,7 @@ onMounted(() => {
   max-height: 220px;
   overflow: auto;
   padding: 8px;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--border);
   border-radius: 6px;
 }
 .presets {

@@ -225,9 +225,6 @@ const getRankIcon = (index) => {
 
 <template>
   <div class="statistics-container">
-    <div class="bg-blob blob-1"></div>
-    <div class="bg-blob blob-2"></div>
-
     <div class="header-section">
       <div class="title-row">
         <div class="icon-box"><TrendingUp size="24" color="white" /></div>
@@ -405,9 +402,9 @@ const getRankIcon = (index) => {
 // 变量
 @primary: #3b82f6;
 @warning: #f59e0b; // 新增警告/求助色
-@bg: #f8fafc;
-@glass: rgba(255, 255, 255, 0.7);
-@border: 1px solid rgba(255, 255, 255, 0.5);
+@bg: var(--app-bg);
+@glass: var(--surface-raised);
+@border: 1px solid var(--border);
 
 .statistics-container {
   padding: 24px 32px;
@@ -417,21 +414,11 @@ const getRankIcon = (index) => {
   overflow: hidden;
   font-family: -apple-system, sans-serif;
 
-  .bg-blob {
-    position: absolute;
-    border-radius: 50%;
-    filter: blur(80px);
-    z-index: 0;
-    opacity: 0.5;
-    &.blob-1 { top: -100px; right: -50px; width: 500px; height: 500px; background: rgba(59, 130, 246, 0.15); }
-    &.blob-2 { bottom: 0; left: -100px; width: 400px; height: 400px; background: rgba(16, 185, 129, 0.1); }
-  }
-
   .glass-panel {
     background: @glass;
     backdrop-filter: blur(12px);
     border: @border;
-    border-radius: 16px;
+    border-radius: 8px;
     box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
   }
 
@@ -455,8 +442,8 @@ const getRankIcon = (index) => {
         display: flex; align-items: center; justify-content: center;
         box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
       }
-      h1 { margin: 0; font-size: 24px; font-weight: 700; color: #1e293b; }
-      p { margin: 4px 0 0; color: #64748b; font-size: 14px; }
+      h1 { margin: 0; font-size: 24px; font-weight: 700; color: var(--text-primary); }
+      p { margin: 4px 0 0; color: var(--text-secondary); font-size: 14px; }
     }
 
     .stats-row {
@@ -469,8 +456,8 @@ const getRankIcon = (index) => {
         &:hover { transform: translateY(-2px); }
         .stat-info {
           display: flex; flex-direction: column;
-          .val { font-weight: 700; font-size: 18px; line-height: 1.2; color: #0f172a; }
-          .lbl { font-size: 12px; color: #64748b; }
+          .val { font-weight: 700; font-size: 18px; line-height: 1.2; color: var(--text-primary); }
+          .lbl { font-size: 12px; color: var(--text-secondary); }
         }
       }
     }
@@ -491,7 +478,7 @@ const getRankIcon = (index) => {
     .section-header {
       margin-bottom: 20px;
       h2 { 
-        font-size: 18px; font-weight: 600; color: #1e293b; display: flex; align-items: center; gap: 8px;
+        font-size: 18px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px;
         .badge { font-size: 12px; background: #fee2e2; color: #ef4444; padding: 2px 8px; border-radius: 4px; }
       }
     }
@@ -505,12 +492,12 @@ const getRankIcon = (index) => {
         animation: slideIn 0.5s ease backwards;
         animation-delay: var(--delay);
 
-        &:hover { transform: scale(1.01); background: rgba(255,255,255,0.9); }
+        &:hover { transform: scale(1.01); background: var(--hover); }
 
         .rank-badge {
           width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
           display: flex; align-items: center; justify-content: center;
-          font-weight: 700; font-size: 14px; background: #f1f5f9; color: #64748b;
+          font-weight: 700; font-size: 14px; background: var(--hover); color: var(--text-secondary);
           &.rank-1 { background: linear-gradient(135deg, #fbbf24, #d97706); color: white; }
           &.rank-2 { background: linear-gradient(135deg, #94a3b8, #64748b); color: white; }
           &.rank-3 { background: linear-gradient(135deg, #d4a373, #a98467); color: white; }
@@ -518,7 +505,7 @@ const getRankIcon = (index) => {
 
         .q-content {
           flex: 1; min-width: 0;
-          .q-title { font-size: 15px; font-weight: 600; color: #333; margin: 0 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+          .q-title { font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 0 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
           .q-meta {
             display: flex; gap: 12px; align-items: center; font-size: 12px; color: #94a3b8;
             .tiny-tag { margin: 0; padding: 0 6px; font-size: 11px; line-height: 18px; border:none; }
@@ -534,7 +521,7 @@ const getRankIcon = (index) => {
             display: flex; align-items: center; justify-content: center; transition: all 0.2s;
             color: #94a3b8;
             
-            &:hover { background: #f1f5f9; }
+            &:hover { background: var(--hover); }
             &.help-btn:hover { color: @warning; background: rgba(245, 158, 11, 0.1); }
             &.view-btn:hover { color: @primary; background: rgba(59, 130, 246, 0.1); }
           }
@@ -550,13 +537,13 @@ const getRankIcon = (index) => {
 
     .panel-header {
       padding: 20px 24px;
-      border-bottom: 1px solid rgba(0,0,0,0.05);
+      border-bottom: 1px solid var(--border);
       display: flex; flex-direction: column; gap: 16px;
       
       .header-left {
         display: flex; align-items: center; gap: 8px;
         h3 { margin: 0; font-size: 16px; font-weight: 600; }
-        .count-badge { background: #e2e8f0; padding: 2px 8px; border-radius: 10px; font-size: 12px; color: #64748b; }
+        .count-badge { background: var(--hover); padding: 2px 8px; border-radius: 10px; font-size: 12px; color: var(--text-secondary); }
       }
       .header-tools {
         display: flex; gap: 12px;
@@ -579,7 +566,7 @@ const getRankIcon = (index) => {
         transition: background 0.2s;
 
         &:hover { 
-          background: rgba(255,255,255,0.6); 
+          background: var(--hover);
           .stats-row-small .help { opacity: 1; transform: translateX(0); }
         }
 
@@ -591,7 +578,7 @@ const getRankIcon = (index) => {
               width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; flex-shrink: 0;
               &.blue { background: #3b82f6; } &.cyan { background: #06b6d4; } &.green { background: #10b981; }
             }
-            .item-title { font-size: 14px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .item-title { font-size: 14px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
           }
           .item-desc { font-size: 12px; color: #94a3b8; }
         }

@@ -661,7 +661,7 @@ git commit -m "feat(chat): add personal model editor and switching"
 - Produces: theme store state `mode: 'light' | 'dark'`, `toggle()`, and `antTheme`.
 - Produces: `resolveInitialTheme(saved, prefersDark) -> 'light' | 'dark'`.
 
-- [ ] **Step 1: Write failing preference tests**
+- [x] **Step 1: Write failing preference tests**
 
 ```javascript
 // web/tests/themePreference.test.mjs
@@ -680,13 +680,13 @@ test('system preference is used when no valid value exists', () => {
 })
 ```
 
-- [ ] **Step 2: Run the web tests and verify failure**
+- [x] **Step 2: Run the web tests and verify failure**
 
 Run: `pnpm --dir web test`
 
 Expected: module-not-found failure for `themePreference.mjs`.
 
-- [ ] **Step 3: Implement preference and Pinia theme state**
+- [x] **Step 3: Implement preference and Pinia theme state**
 
 ```javascript
 // web/src/utils/themePreference.mjs
@@ -698,7 +698,7 @@ export function resolveInitialTheme(saved, prefersDark) {
 
 The store initializes from `localStorage.getItem('theme-mode')` and `matchMedia('(prefers-color-scheme: dark)')`, persists only `light`/`dark`, and sets `document.documentElement.dataset.theme`. Its computed Ant config uses `theme.defaultAlgorithm` or `theme.darkAlgorithm` and shared tokens from `assets/theme.js`.
 
-- [ ] **Step 4: Wire Ant Design and add the icon toggle**
+- [x] **Step 4: Wire Ant Design and add the icon toggle**
 
 ```vue
 <!-- web/src/App.vue -->
@@ -713,11 +713,11 @@ onBeforeMount(themeStore.apply)
 
 Add an icon-only button near user information in desktop and mobile navigation. Show `Moon` in light mode and `Sun` in dark mode, with tooltips `切换到深色模式` and `切换到浅色模式`.
 
-- [ ] **Step 5: Replace hardcoded structural colors with semantic tokens**
+- [x] **Step 5: Replace hardcoded structural colors with semantic tokens**
 
 Define `--app-bg`, `--surface`, `--surface-raised`, `--text-primary`, `--text-secondary`, `--border`, `--hover`, and `--danger` under both `[data-theme='light']` and `[data-theme='dark']`. Replace white/black backgrounds and text in the listed layout, chat, user drawer, graph, database, multimodal, statistics, and settings components. Do not change domain accent colors or redesign page composition.
 
-- [ ] **Step 6: Verify tests, color scan, and build**
+- [x] **Step 6: Verify tests, color scan, and build**
 
 Run: `pnpm --dir web test`
 
@@ -731,7 +731,7 @@ Run: `pnpm --dir web build`
 
 Expected: Vite build exits 0.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add web/src/stores/theme.js web/src/utils/themePreference.mjs web/tests/themePreference.test.mjs web/src/assets/theme.js web/src/App.vue web/src/layouts/AppLayout.vue web/src/assets/main.css web/src/components/ChatComponent.vue web/src/components/MessageComponent.vue web/src/components/RefsSidebar.vue web/src/components/UserManagementComponent.vue web/src/views/GraphView.vue web/src/views/DataBaseView.vue web/src/views/DataBaseInfoView.vue web/src/views/MultimodalKbView.vue web/src/views/AnswerStatistics.vue web/src/views/SettingView.vue

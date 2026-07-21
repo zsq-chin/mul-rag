@@ -1241,9 +1241,9 @@ const getAuthHeaders = () => {
 }
 
 #container {
-  background: rgb(243, 243, 243);
+  background: var(--surface-raised);
   margin: 10px 14px;
-  border-radius: 16px;
+  border-radius: 8px;
   width: calc(100% - 48px);
   height: calc(100vh - 100px);
   resize: horizontal;
@@ -1270,16 +1270,16 @@ const getAuthHeaders = () => {
 /* 左半部分图谱 */
 .graph-panel {
   flex: 1;
-  background: rgb(243, 243, 243);
-  border-radius: 16px;
+  background: var(--surface-raised);
+  border-radius: 8px;
   overflow: hidden;
 }
 
 /* 右半部分控制区 */
 .control-panel {
   width: 400px;
-  background: #fff;
-  border-radius: 16px;
+  background: var(--surface);
+  border-radius: 8px;
   padding: 20px;
   box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
 
@@ -1308,7 +1308,7 @@ const getAuthHeaders = () => {
 
 .uploaded-files,
 .downloaded-files {
-  background: #fafafa;
+  background: var(--surface-raised);
   border-radius: 8px;
   padding: 0.8rem;
   margin-top: 1rem;
@@ -1319,16 +1319,16 @@ const getAuthHeaders = () => {
 .uploaded-title {
   font-weight: bold;
   margin-bottom: 0.5rem;
-  color: #333;
+  color: var(--text-primary);
 }
 
 .uploaded-list {
   max-height: 200px; /* 内部文件列表的滚动区域 */
   overflow-y: auto;
-  background: #fff;
+  background: var(--surface);
   border-radius: 6px;
   padding: 0.5rem;
-  border: 1px solid #eee;
+  border: 1px solid var(--border);
 }
 
 .uploaded-list ul {
@@ -1342,7 +1342,7 @@ const getAuthHeaders = () => {
   justify-content: space-between;
   align-items: center;
   padding: 6px 8px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--border);
 }
 
 .uploaded-list li:last-child {
@@ -1351,12 +1351,12 @@ const getAuthHeaders = () => {
 
 .file-name {
   flex-grow: 1;
-  color: #555;
+  color: var(--text-primary);
   word-break: break-all;
 }
 
 .file-size {
-  color: #666;
+  color: var(--text-secondary);
   font-size: 12px;
   margin-left: 16px;
   white-space: nowrap;
@@ -1373,7 +1373,7 @@ li {
   justify-content: space-between;
   align-items: center;
   padding: 8px 0;
-  border-bottom: 1px dashed #eee;
+  border-bottom: 1px dashed var(--border);
 }
 
 li:last-child {
@@ -1384,11 +1384,11 @@ li:last-child {
   width: 6px;
 }
 .uploaded-list::-webkit-scrollbar-thumb {
-  background-color: #ccc;
+  background-color: var(--gray-500);
   border-radius: 3px;
 }
 .uploaded-list::-webkit-scrollbar-track {
-  background: #f5f5f5;
+  background: var(--hover);
 }
 .file-actions {
   display: flex;

@@ -165,14 +165,14 @@ const isEmptyAndLoading = computed(() => {
   font-size: 15px;
   line-height: 24px;
   box-sizing: border-box;
-  color: black;
+  color: var(--text-primary);
   max-width: 100%;
   position: relative;
   letter-spacing: .25px;
 
   &.user, &.sent {
     max-width: 95%;
-    color: rgb(0, 0, 0);
+    color: var(--text-primary);
     background-color: var(--main-10);
     align-self: flex-end;
     border-radius: .5rem;
@@ -180,7 +180,7 @@ const isEmptyAndLoading = computed(() => {
   }
 
   &.assistant, &.received {
-    color: initial;
+    color: var(--text-primary);
     width: 100%;
     text-align: left;
     margin: 0 0 16px 0;
@@ -201,7 +201,7 @@ const isEmptyAndLoading = computed(() => {
     padding: 0.5rem 1rem;
     border-radius: 8px;
     text-align: left;
-    background: #fffbfb;
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
     margin-bottom: 10px;
     cursor: pointer;
   }
@@ -324,7 +324,7 @@ const isEmptyAndLoading = computed(() => {
 .retry-hint {
   margin-top: 8px;
   padding: 8px 16px;
-  color: #666;
+  color: var(--text-secondary);
   font-size: 14px;
   text-align: left;
 }
@@ -399,7 +399,7 @@ const isEmptyAndLoading = computed(() => {
     gap: 6px;
 
     .rec-item {
-      background-color: #fff;
+      background-color: var(--surface-raised);
       border: 1px solid var(--gray-200);
       border-radius: 6px;
       padding: 6px 10px;

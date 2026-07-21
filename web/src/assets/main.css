@@ -2,6 +2,59 @@
 
 :root {
   --header-height: 60px;
+  --app-bg: #f4f6f7;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --text-primary: #17191c;
+  --text-secondary: #66707a;
+  --border: #d9dee3;
+  --hover: #eef1f3;
+  --danger: #c73234;
+}
+
+:root[data-theme='dark'] {
+  --app-bg: #151719;
+  --surface: #1d2023;
+  --surface-raised: #25292d;
+  --text-primary: #f0f2f3;
+  --text-secondary: #aeb6bd;
+  --border: #3b4248;
+  --hover: #2c3136;
+  --danger: #ff6b6d;
+
+  --gray-10000: #ffffff;
+  --gray-2000: #f5f6f7;
+  --gray-1000: #eef0f2;
+  --gray-900: #e4e7e9;
+  --gray-800: #cbd1d5;
+  --gray-700: #b8c0c6;
+  --gray-600: #929ca4;
+  --gray-500: #727d85;
+  --gray-400: #59636b;
+  --gray-300: #41484f;
+  --gray-200: #30353a;
+  --gray-100: #24282c;
+  --gray-50: #202428;
+  --gray-10: #1d2023;
+  --gray-0: #1d2023;
+
+  --main-light-2: #3f3434;
+  --main-light-3: #292526;
+  --main-light-4: #272a2d;
+  --main-light-5: #24272a;
+  --main-light-6: #202326;
+  --main-light-7: #1d2023;
+  --main-50: #3a2021;
+  --main-25: #321d1e;
+  --main-10: #2b1b1c;
+  --main-5: #25191a;
+}
+
+html,
+body,
+#app {
+  background: var(--app-bg);
+  color: var(--text-primary);
 }
 
 /* layout */
@@ -9,7 +62,8 @@
 .layout-container {
   width: 100%;
   padding: 0px 30px;
-  background-color: #FAFCFD;
+  background-color: var(--app-bg);
+  color: var(--text-primary);
 
   h2 {
     margin: 20px 0 10px 0;

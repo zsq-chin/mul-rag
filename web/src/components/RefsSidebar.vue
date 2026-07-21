@@ -471,7 +471,8 @@ defineExpose({
   right: calc(-1 * var(--refs-sidebar-floating-width)); /* 初始状态隐藏在右侧 - 使用更大宽度 */
   width: var(--refs-sidebar-floating-width); /* 未固定时的宽度 */
   height: 100vh;
-  background: white;
+  background: var(--surface);
+  color: var(--text-primary);
   z-index: 1000;
   transition: right 0.3s ease, width 0.3s ease; /* 添加宽度过渡效果 */
   display: flex;
@@ -516,7 +517,7 @@ defineExpose({
   &.visible:not(.pinned) {
     box-shadow: -2px 0 15px rgba(0, 0, 0, 0.15);
     .refs-sidebar {
-      background-color: white;
+      background-color: var(--surface);
     }
   }
 
@@ -573,7 +574,7 @@ defineExpose({
     justify-content: center;
     align-items: center;
     height: 200px;
-    color: #999;
+    color: var(--text-secondary);
     font-size: 14px;
     background-color: var(--gray-100);
     border-radius: 4px;
@@ -597,7 +598,7 @@ defineExpose({
 
     p {
       margin: 0;
-      color: #666;
+      color: var(--text-secondary);
     }
   }
 
@@ -695,7 +696,7 @@ defineExpose({
     gap: 16px;
 
     .web-result-card {
-      background-color: #ffffff;
+      background-color: var(--surface-raised);
       border-radius: 8px;
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
       transition: all 0.3s ease;

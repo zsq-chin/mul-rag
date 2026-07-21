@@ -6,11 +6,12 @@ import {
   BugOutlined,
   ExclamationCircleOutlined,
 } from '@ant-design/icons-vue'
-import { Bot, Flame ,Waypoints,TextSearch ,Speech ,Share2 ,Captions ,Milestone, LibraryBig,BookOpenCheck , MessageSquareMore, Settings,Hourglass,PencilLine ,Move, BarChart3, Layers } from 'lucide-vue-next';
+import { Bot, Flame ,Waypoints,TextSearch ,Speech ,Share2 ,Captions ,Milestone, LibraryBig,BookOpenCheck , MessageSquareMore, Settings,Hourglass,PencilLine ,Move, BarChart3, Layers, Moon, Sun } from 'lucide-vue-next';
 
 import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
 import { useUserStore } from '@/stores/user'
+import { useThemeStore } from '@/stores/theme'
 import { navigationForRole } from '@/utils/access.mjs'
 import DebugComponent from '@/components/DebugComponent.vue'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
@@ -19,6 +20,7 @@ import UserManagementComponent from '@/components/UserManagementComponent.vue'
 const configStore = useConfigStore()
 const databaseStore = useDatabaseStore()
 const userStore = useUserStore()
+const themeStore = useThemeStore()
 
 const layoutSettings = reactive({
   showDebug: false,
@@ -165,6 +167,19 @@ const mainList = computed(() => {
           </div>
           <div class="fill" style="flex-grow: 1;"></div>
 
+          <a-tooltip placement="right">
+            <template #title>{{ themeStore.mode === 'dark' ? '切换到浅色模式' : '切换到深色模式' }}</template>
+            <button
+              type="button"
+              class="nav-item theme-toggle"
+              :aria-label="themeStore.mode === 'dark' ? '切换到浅色模式' : '切换到深色模式'"
+              @click="themeStore.toggle"
+            >
+              <Sun v-if="themeStore.mode === 'dark'" class="icon" :size="20" />
+              <Moon v-else class="icon" :size="20" />
+            </button>
+          </a-tooltip>
+
           <!-- <div class="nav-item api-docs">
             <a-tooltip placement="right">
               <template #title>接口文档 {{ apiDocsUrl }}</template>
@@ -212,6 +227,16 @@ const mainList = computed(() => {
             <span class="text">{{ item.name }}</span>
           </button>
         </template>
+        <button
+          type="button"
+          class="nav-item mobile-theme-toggle"
+          :aria-label="themeStore.mode === 'dark' ? '切换到浅色模式' : '切换到深色模式'"
+          @click="themeStore.toggle"
+        >
+          <Sun v-if="themeStore.mode === 'dark'" class="icon" :size="20" />
+          <Moon v-else class="icon" :size="20" />
+          <span class="text">主题</span>
+        </button>
         <UserInfoComponent class="mobile-user-info" />
       </div>
       <div
@@ -269,12 +294,12 @@ const mainList = computed(() => {
 .collapse-button {
   position: fixed;
   z-index: 100;
-  right: 13vh;
-  top: 1vh;
+  right: 14px;
+  top: 9px;
   cursor: pointer;
   width: 42px;
   height: 42px;
-  background-color: white;
+  background-color: var(--surface-raised);
   border-radius: 50%;
   box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
   display: flex;
@@ -285,7 +310,7 @@ const mainList = computed(() => {
 }
 
 .collapse-button:hover {
-  background-color: #f0f0f0;
+  background-color: var(--hover);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
 }
 
@@ -347,7 +372,7 @@ div.header, #app-router-view {
       text-decoration: none;
       font-size: 24px;
       font-weight: bold;
-      color: #333;
+      color: var(--text-primary);
     }
   }
 
@@ -362,7 +387,7 @@ div.header, #app-router-view {
     border: 1px solid transparent;
     border-radius: 8px;
     background-color: transparent;
-    color: #000000;
+    color: var(--text-primary);
     font-size: 20px;
     transition: background-color 0.2s ease-in-out;
     margin: 0;
@@ -408,8 +433,8 @@ div.header, #app-router-view {
     &.active {
       font-weight: bold;
       color: var(--main-600);
-      background-color: white;
-      border: 1px solid white;
+      background-color: var(--surface);
+      border: 1px solid var(--surface);
     }
 
     &.warning {
@@ -417,7 +442,7 @@ div.header, #app-router-view {
     }
 
     &:hover {
-      background-color: rgba(255, 255, 255, 0.8);
+      background-color: var(--hover);
       backdrop-filter: blur(10px);
     }
 
@@ -431,7 +456,7 @@ div.header, #app-router-view {
   .setting {
     width: auto;
     font-size: 20px;
-    color: #333;
+    color: var(--text-primary);
     margin-bottom: 8px;
     padding: 16px 12px;
 
@@ -496,7 +521,7 @@ div.header, #app-router-view {
       transition: color 0.1s ease-in-out, font-size 0.1s ease-in-out;
 
       &.active {
-        color: black;
+        color: var(--text-primary);
         font-size: 1.1rem;
       }
 
@@ -529,7 +554,7 @@ div.header, #app-router-view {
   border-right: none;
   border-bottom: 1px solid var(--main-light-2);
   background-color: var(--main-light-3);
-  padding: 0 20px;
+  padding: 0 72px 0 20px;
   gap: 0px;
 
   .logo {
@@ -602,6 +627,16 @@ div.header, #app-router-view {
 
       &.active {
         color: var(--main-600);
+      }
+    }
+
+    &.theme-toggle {
+      width: 42px;
+      height: 42px;
+      padding: 0;
+
+      .icon {
+        margin-right: 0;
       }
     }
 
@@ -679,7 +714,7 @@ div.header, #app-router-view {
       text-decoration: none;
       font-size: 24px;
       font-weight: bold;
-      color: #333;
+      color: var(--text-primary);
     }
   }
 
@@ -694,7 +729,7 @@ div.header, #app-router-view {
     border: 1px solid transparent;
     border-radius: 8px;
     background-color: transparent;
-    color: #000000;
+    color: var(--text-primary);
     font-size: 20px;
     transition: background-color 0.2s ease-in-out;
     margin: 0;
@@ -739,8 +774,8 @@ div.header, #app-router-view {
     &.active {
       font-weight: bold;
       color: var(--main-600);
-      background-color: white;
-      border: 1px solid white;
+      background-color: var(--surface);
+      border: 1px solid var(--surface);
     }
 
     &.warning {
@@ -748,7 +783,7 @@ div.header, #app-router-view {
     }
 
     &:hover {
-      background-color: rgba(255, 255, 255, 0.8);
+      background-color: var(--hover);
       backdrop-filter: blur(10px);
     }
 
@@ -762,7 +797,7 @@ div.header, #app-router-view {
   .setting {
     width: auto;
     font-size: 20px;
-    color: #333;
+    color: var(--text-primary);
     margin-bottom: 8px;
     padding: 16px 12px;
 

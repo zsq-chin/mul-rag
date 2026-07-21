@@ -1271,7 +1271,7 @@ const handleBatchIndex = async () => {
     gap: 20px;
 
     .results-overview {
-      background-color: #fff;
+      background-color: var(--surface-raised);
       border-radius: 8px;
       padding: 16px;
       border: 1px solid var(--main-light-3);
@@ -1311,7 +1311,7 @@ const handleBatchIndex = async () => {
     .query-result-card {
       padding: 20px;
       border-radius: 8px;
-      background: #fff;
+      background: var(--surface-raised);
       border: 1px solid var(--main-light-3);
       transition: box-shadow 0.3s ease;
 
@@ -1586,7 +1586,7 @@ const handleBatchIndex = async () => {
 
 .url-input .ant-textarea {
   border-color: var(--main-light-3);
-  background-color: #fff;
+  background-color: var(--surface);
   font-family: monospace;
   resize: vertical;
 }
