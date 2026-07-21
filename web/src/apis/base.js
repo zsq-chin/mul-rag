@@ -158,6 +158,18 @@ export function apiPut(url, data = {}, options = {}, requiresAuth = false) {
   )
 }
 
+export function apiPatch(url, data = {}, options = {}, requiresAuth = false) {
+  return apiRequest(
+    url,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+      ...options
+    },
+    requiresAuth
+  )
+}
+
 /**
  * 发送DELETE请求
  * @param {string} url - API端点

@@ -17,15 +17,6 @@
             <MessageSquarePlus size="20" color="var(--gray-800)"/>
           </a-tooltip>
         </div>
-        <div style="display: none;">
-        <!-- <div> -->
-          <ModelSelectorComponent
-            class="nav-btn borderless max-width"
-            @select-model="handleModelSelect"
-            :model_name="configStore.config?.model_name"
-            :model_provider="configStore.config?.model_provider"
-          />
-        </div>
         <div class="model-title-fixed">新建对话</div>
       </div>
       <div class="header__right">
@@ -93,6 +84,13 @@
           @keydown="handleKeyDown"
         >
           <template #options-left>
+            <ModelSelectorComponent
+              :model_name="configStore.config?.model_name"
+              :model_provider="configStore.config?.model_provider"
+              :selected="selectedModel"
+              :allow-personal="true"
+              @select-model="handleModelSelect"
+            />
             <div
               :class="{'switch': true, 'opt-item': true, 'active': meta.use_web}"
               v-if="configStore.config.enable_web_search"
@@ -194,6 +192,7 @@ import { Ellipsis, PanelLeftOpen, MessageSquarePlus, Compass, Waypoints, BookChe
 import { onClickOutside } from '@vueuse/core'
 import { useConfigStore } from '@/stores/config'
 import { useUserStore } from '@/stores/user'
+import { useUserModelsStore } from '@/stores/userModels'
 import { message } from 'ant-design-vue'
 import MessageInputComponent from '@/components/MessageInputComponent.vue'
 import MessageComponent from '@/components/MessageComponent.vue'
@@ -201,6 +200,7 @@ import RefsSidebar from '@/components/RefsSidebar.vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import { chatApi } from '@/apis/auth_api'
 import { canUseGraph, canUseKnowledgeRetrieval } from '@/utils/access.mjs'
+import { applyModelSelection } from '@/utils/modelSelection.mjs'
 
 const props = defineProps({
   conv: Object,
@@ -210,10 +210,12 @@ const props = defineProps({
 const emit = defineEmits(['rename-title', 'newconv','sent-message']);
 const configStore = useConfigStore()
 const userStore = useUserStore()
+const userModelsStore = useUserModelsStore()
 const { conv, state } = toRefs(props)
 const chatContainer = ref(null)
 
 const isStreaming = ref(false)
+const selectedModel = ref({ kind: 'builtin', provider: null, name: null })
 const userIsScrolling = ref(false);
 const shouldAutoScroll = ref(true);
 
@@ -761,9 +763,24 @@ const retryMessage = (id) => {
 }
 
 // 从本地存储加载数据
-onMounted(() => {
+onMounted(async () => {
   scrollToBottom()
   loadDatabases()
+  try {
+    const models = await userModelsStore.load()
+    const recentModel = models.find(model => model.last_used_at)
+    if (recentModel) {
+      const restored = {
+        kind: 'user',
+        userModelId: recentModel.id,
+        name: recentModel.display_name,
+      }
+      userModelsStore.selectedId = recentModel.id
+      applySelectionToMeta(restored)
+    }
+  } catch (error) {
+    console.warn('个人模型列表加载失败:', error?.message || 'unknown')
+  }
   refsSidebarRef.value.togglePin()
   chatContainer.value.addEventListener('scroll', handleUserScroll);
 
@@ -798,15 +815,6 @@ const forceScrollToBottom = () => {
     chatContainer.value.scrollTop = chatContainer.value.scrollHeight - chatContainer.value.clientHeight;
   }, 10);
 };
-
-// 监听 meta 对象的变化，并保存到本地存储
-// watch(
-//   () => meta,
-//   (newMeta) => {
-//     localStorage.setItem('chat-meta', JSON.stringify(newMeta));
-//   },
-//   { deep: true }
-// );
 
 watch(
   () => conv.value.history,
@@ -851,11 +859,26 @@ const retryStoppedMessage = (id) => {
 }
 
 // 处理模型选择
-const handleModelSelect = ({ provider, name }) => {
-  configStore.setConfigValues({
-    model_provider: provider,
-    model_name: name,
-  })
+const applySelectionToMeta = selection => {
+  const next = applyModelSelection(meta, selection)
+  for (const key of ['user_model_id', 'model_provider', 'model_name', 'api_key', 'apiKey', 'api_base', 'encrypted_api_key']) {
+    delete meta[key]
+  }
+  Object.assign(meta, next)
+  selectedModel.value = selection
+}
+
+const handleModelSelect = async selection => {
+  try {
+    if (selection.kind === 'user') {
+      await userModelsStore.select(selection.userModelId)
+    } else {
+      userModelsStore.selectedId = null
+    }
+    applySelectionToMeta(selection)
+  } catch (error) {
+    message.error(error.message || '切换模型失败')
+  }
 }
 
 // 判断是否是最新的助手消息

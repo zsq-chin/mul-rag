@@ -548,7 +548,7 @@ git commit -m "feat(chat): add encrypted per-user model credentials"
 - Produces: chat metadata containing either built-in provider/name or `user_model_id`, never an API key.
 - Consumes: Task 4 personal-model API.
 
-- [ ] **Step 1: Write failing model-selection serialization tests**
+- [x] **Step 1: Write failing model-selection serialization tests**
 
 ```javascript
 // web/tests/modelSelection.test.mjs
@@ -571,13 +571,13 @@ test('built-in selection clears personal id', () => {
 })
 ```
 
-- [ ] **Step 2: Run the web tests and verify the utility is missing**
+- [x] **Step 2: Run the web tests and verify the utility is missing**
 
 Run: `pnpm --dir web test`
 
 Expected: module-not-found failure for `modelSelection.mjs`.
 
-- [ ] **Step 3: Implement metadata serialization and API store**
+- [x] **Step 3: Implement metadata serialization and API store**
 
 ```javascript
 // web/src/utils/modelSelection.mjs
@@ -597,11 +597,11 @@ export function applyModelSelection(meta, selection) {
 
 `userModels.js` stores only response metadata and selected ID in memory. Its `load`, `create`, `update`, `remove`, `validate`, and `select` actions call `chatApi`; no persistence plugin or browser storage is used. Sort personal models by descending `last_used_at`, then name.
 
-- [ ] **Step 4: Build the editor modal**
+- [x] **Step 4: Build the editor modal**
 
 `UserModelEditor.vue` contains inputs for display name, provider (`openai-compatible` initially), model name, API base, and password-type API key. On edit, the key input starts empty with text `留空则保留原密钥`; submit omits `api_key` when empty. It clears all form fields in `afterClose` and never logs form data.
 
-- [ ] **Step 5: Integrate selector and chat metadata**
+- [x] **Step 5: Integrate selector and chat metadata**
 
 `ModelSelectorComponent.vue` renders built-in and personal groups in a scrollable menu. Each personal row selects the model; an adjacent icon-only menu provides edit/delete with tooltips. A final `Plus` icon command opens `UserModelEditor`. Emit `{ kind: 'builtin', provider, name }` or `{ kind: 'user', userModelId, name }` exactly.
 
@@ -617,7 +617,7 @@ const handleModelSelect = async selection => {
 
 Delete stale model keys before `Object.assign`, or replace the metadata model fields explicitly so switching cannot retain both kinds. Show ordinary and multimodal knowledge-base selectors to every authenticated role; hide only the graph selector unless `userStore.isSuperAdmin`.
 
-- [ ] **Step 6: Verify tests, build, and browser storage**
+- [x] **Step 6: Verify tests, build, and browser storage**
 
 Run: `pnpm --dir web test`
 
@@ -629,7 +629,7 @@ Expected: Vite build exits 0.
 
 Browser acceptance: add a disposable model key, switch models, refresh, and delete it. Inspect Local Storage, Session Storage, IndexedDB, network response bodies, and console output; none may contain the disposable key.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add web/src/apis/auth_api.js web/src/stores/userModels.js web/src/components/UserModelEditor.vue web/src/components/ModelSelectorComponent.vue web/src/components/ChatComponent.vue web/src/utils/modelSelection.mjs web/tests/modelSelection.test.mjs web/src/stores/user.js

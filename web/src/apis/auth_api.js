@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiDelete, apiPut } from './base'
+import { apiGet, apiPost, apiDelete, apiPatch, apiPut } from './base'
 import { useUserStore } from '@/stores/user'
 
 /**
@@ -70,6 +70,13 @@ export const chatApi = {
   getMultimodalKbs: () => apiGet('/api/chat/multimodal/kbs', {}, true),
 
   getKnowledgeBases: () => apiGet('/api/data/', {}, true),
+
+  getUserModels: () => apiGet('/api/chat/user-models', {}, true),
+  createUserModel: (payload) => apiPost('/api/chat/user-models', payload, {}, true),
+  updateUserModel: (modelId, payload) => apiPatch(`/api/chat/user-models/${modelId}`, payload, {}, true),
+  deleteUserModel: (modelId) => apiDelete(`/api/chat/user-models/${modelId}`, {}, true),
+  selectUserModel: (modelId) => apiPost(`/api/chat/user-models/${modelId}/select`, {}, {}, true),
+  validateUserModel: (payload) => apiPost('/api/chat/user-models/validate', payload, {}, true),
 
   /**
    * 获取默认智能体

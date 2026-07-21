@@ -121,6 +121,10 @@ export const useUserStore = defineStore('user', () => {
     localStorage.removeItem('username')
     localStorage.removeItem('user_role')
     localStorage.removeItem('is_cas_user')
+
+    import('@/stores/userModels').then(({ useUserModelsStore }) => {
+      useUserModelsStore().reset()
+    })
   }
 
   async function initialize(admin) {
