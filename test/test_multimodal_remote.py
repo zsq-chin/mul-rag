@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import Mock, patch
 
@@ -7,12 +8,103 @@ from server.utils.multimodal_remote import (
     format_multimodal_context,
     normalize_multimodal_kbs,
     normalize_multimodal_results,
+    normalize_multimodal_image_page,
     pick_first_kb_id,
     search_multimodal_remote,
 )
 
 
 class MultimodalRemoteTests(unittest.TestCase):
+    def test_referenced_images_and_image_path_are_deduplicated(self):
+        payload = {
+            "results": [
+                {
+                    "chunk_text": "![Well structure](./images/well-structure.png)",
+                    "source": json.dumps(
+                        {
+                            "file_id": "file-1",
+                            "image_path": "well-structure.png",
+                            "referenced_images": [
+                                "well-structure.png",
+                                {"image_path": "casing-program.png", "caption": "Casing program"},
+                            ],
+                        }
+                    ),
+                }
+            ]
+        }
+
+        result = normalize_multimodal_results(payload, kb_id="kb-1")[0]
+
+        self.assertEqual(
+            [image["path"] for image in result["images"]],
+            ["well-structure.png", "casing-program.png"],
+        )
+        self.assertEqual(result["images"][1]["alt"], "Casing program")
+
+    def test_unsafe_image_paths_are_rejected(self):
+        payload = {
+            "results": [
+                {
+                    "fileId": "file-1",
+                    "text": "safe",
+                    "images": [
+                        "../secret.png",
+                        "/absolute.png",
+                        "https://evil.example/tracker.png",
+                        "images/safe%00.png",
+                        "images/safe.png",
+                    ],
+                }
+            ]
+        }
+
+        result = normalize_multimodal_results(payload, kb_id="kb-1")[0]
+
+        self.assertEqual([image["path"] for image in result["images"]], ["safe.png"])
+
+    def test_complex_html_table_is_preserved_as_table_content(self):
+        payload = {
+            "results": [
+                {
+                    "content": '<table><tr><td rowspan="2">A</td></tr></table>',
+                    "source": {"file_id": "file-1"},
+                }
+            ]
+        }
+
+        result = normalize_multimodal_results(payload, kb_id="kb-1")[0]
+
+        self.assertEqual(result["contentType"], "table")
+        self.assertIn("rowspan", result["text"])
+
+    def test_unpaged_image_catalog_is_sliced_on_the_server(self):
+        page = normalize_multimodal_image_page(
+            {"images": [{"name": f"image-{index}.png"} for index in range(5)]},
+            page=2,
+            page_size=2,
+        )
+
+        self.assertEqual([item["name"] for item in page["items"]], ["image-2.png", "image-3.png"])
+        self.assertEqual(page["total"], 5)
+        self.assertEqual(page["page"], 2)
+        self.assertEqual(page["pageSize"], 2)
+
+    def test_oversized_remote_page_is_still_limited_on_the_server(self):
+        page = normalize_multimodal_image_page(
+            {
+                "items": [{"name": f"image-{index}.png"} for index in range(5)],
+                "page": 2,
+                "pageSize": 2,
+                "total": 5,
+            },
+            page=2,
+            page_size=2,
+        )
+
+        self.assertEqual([item["name"] for item in page["items"]], ["image-2.png", "image-3.png"])
+        self.assertEqual(page["total"], 5)
+
     def test_build_remote_url_joins_configured_base(self):
         url = build_multimodal_remote_url("pdf/images", "http://remote.example/api/v1/")
 

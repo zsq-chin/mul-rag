@@ -62,9 +62,7 @@ export const deleteKb = (data) => ragRequest.post('/kb/delete', data)
 
 export const getKbFiles = (params) => ragRequest.get('/kb/files', { params })
 
-export const getKbImages = (params) => ragRequest.get('/kb/images', { params })
-
-export const getAllKbImages = (params) => ragRequest.get('/kb/images/all', { params })
+export const getKbImages = (params, signal) => ragRequest.get('/kb/images', { params, signal })
 
 export const getFileOriginal = (params) => ragRequest.get('/kb/file/original', { params })
 

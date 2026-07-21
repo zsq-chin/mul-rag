@@ -2,24 +2,26 @@
   <component
     :is="openInNewTab ? 'a' : 'div'"
     v-if="objectUrl"
+    ref="rootElement"
     :href="openInNewTab ? objectUrl : undefined"
     :target="openInNewTab ? '_blank' : undefined"
     :rel="openInNewTab ? 'noopener noreferrer' : undefined"
     class="authenticated-image"
   >
     <img :src="objectUrl" :alt="alt" loading="lazy" />
-    <span>{{ label }}</span>
+    <span v-if="label">{{ label }}</span>
   </component>
-  <div v-else class="authenticated-image authenticated-image-state" :aria-label="alt">
+  <div v-else ref="rootElement" class="authenticated-image authenticated-image-state" :aria-label="alt">
     <a-spin v-if="loading" size="small" />
     <span v-else>{{ error || label }}</span>
   </div>
 </template>
 
 <script setup>
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useUserStore } from '@/stores/user'
 import { fetchAuthenticatedBlob } from '@/utils/authenticated-image.mjs'
+import { observeUntilVisible } from '@/utils/lazy-image.mjs'
 
 const props = defineProps({
   src: { type: String, required: true },
@@ -32,7 +34,10 @@ const userStore = useUserStore()
 const objectUrl = ref('')
 const loading = ref(false)
 const error = ref('')
+const rootElement = ref(null)
+const visible = ref(false)
 let controller = null
+let stopVisibilityObserver = () => {}
 
 const releaseObjectUrl = () => {
   if (objectUrl.value) URL.revokeObjectURL(objectUrl.value)
@@ -57,9 +62,22 @@ const loadImage = async () => {
   }
 }
 
-watch(() => [props.src, userStore.token], loadImage, { immediate: true })
+watch(
+  () => [props.src, userStore.token, visible.value],
+  ([_src, _token, canLoad]) => {
+    if (canLoad && props.src) loadImage()
+  },
+  { immediate: true },
+)
+
+onMounted(() => {
+  stopVisibilityObserver = observeUntilVisible(rootElement.value, () => {
+    visible.value = true
+  })
+})
 
 onBeforeUnmount(() => {
+  stopVisibilityObserver()
   controller?.abort()
   releaseObjectUrl()
 })

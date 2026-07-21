@@ -85,13 +85,17 @@
                 <div class="image-toolbar">
                   <a-button :loading="imageLoading" @click="loadImages">🔄 刷新图片</a-button>
                   <a-button type="primary" :loading="savingImageDescs" @click="saveAllImageDescs">💾 保存当前页描述修改</a-button>
-                  <span class="image-total">共 {{ imageList.length }} 张，当前只加载 {{ pagedImageList.length }} 张</span>
+                  <span class="image-total">共 {{ imageTotal }} 张，当前加载 {{ imageList.length }} 张</span>
                 </div>
                 <div class="image-grid">
-                  <a-card v-for="(img, idx) in pagedImageList" :key="getImageKey(img, idx)" hoverable class="img-card">
+                  <a-card v-for="(img, idx) in imageList" :key="getImageKey(img, idx)" hoverable class="img-card">
                     <template #cover>
                       <div class="img-wrapper" @click="previewSingleImage(img)">
-                         <img :src="getImgUrl(img)" alt="img" loading="lazy" decoding="async" />
+                         <AuthenticatedImage
+                           :src="getImgUrl(img)"
+                           :alt="img.summary || img.img_name || '知识库图片'"
+                           :open-in-new-tab="false"
+                         />
                       </div>
                     </template>
                     <a-card-meta>
@@ -109,11 +113,11 @@
                 </div>
                 <a-empty v-if="!imageList.length" description="暂无图片数据" />
                 <a-pagination
-                  v-if="imageList.length > imagePageSize"
+                  v-if="imageTotal > imagePageSize"
                   class="image-pagination"
                   :current="imagePage"
                   :page-size="imagePageSize"
-                  :total="imageList.length"
+                  :total="imageTotal"
                   :page-size-options="imagePageSizeOptions"
                   show-size-changer
                   show-less-items
@@ -747,7 +751,14 @@
     </a-modal>
 
     <!-- 文件预览弹窗 -->
-    <a-modal v-model:open="previewVisible" title="📄 文件预览" width="80%" :footer="null">
+    <a-modal
+      v-model:open="previewVisible"
+      title="📄 文件预览"
+      width="80%"
+      :footer="null"
+      :destroy-on-close="true"
+      @after-close="clearFilePreview"
+    >
       <a-spin :spinning="previewLoading">
         <a-tabs v-if="previewFileRecord">
           <a-tab-pane key="md" tab="📝 解析内容">
@@ -761,7 +772,11 @@
                <template #renderItem="{ item }">
                  <a-list-item>
                    <div class="preview-image-row">
-                     <img :src="getPreviewImageUrl(item)" />
+                     <AuthenticatedImage
+                       :src="getPreviewImageUrl(item)"
+                       :alt="item.img_name || item.imageName || item.image_path || item.name || '文件图片'"
+                       :open-in-new-tab="false"
+                     />
                      <div>
                        <div class="kb-name">{{ item.img_name || item.imageName || item.image_path || item.name }}</div>
                        <div class="kb-meta">P{{ item.page_num || item.page || '-' }}</div>
@@ -783,7 +798,12 @@
              <div style="height: 600px; overflow-y: auto;">
                 <div v-for="p in previewFileRecord.pageCount" :key="p" style="margin-bottom: 20px; text-align: center;">
                    <div>Page {{ p }}</div>
-                   <img :src="getPreviewPageUrl(p)" style="max-width: 100%; border: 1px solid var(--border);" loading="lazy" />
+                   <AuthenticatedImage
+                     class="page-preview-image"
+                     :src="getPreviewPageUrl(p)"
+                     :alt="`第 ${p} 页`"
+                     :open-in-new-tab="false"
+                   />
                 </div>
              </div>
           </a-tab-pane>
@@ -792,9 +812,23 @@
     </a-modal>
 
     <!-- 图片放大预览 -->
-    <a-modal v-model:open="singleImagePreviewVisible" :footer="null" centered width="80%" :bodyStyle="{ padding: 0 }">
+    <a-modal
+      v-model:open="singleImagePreviewVisible"
+      :footer="null"
+      centered
+      width="80%"
+      :bodyStyle="{ padding: 0 }"
+      :destroy-on-close="true"
+      @after-close="singleImagePreviewUrl = ''"
+    >
         <div style="display: flex; justify-content: center; align-items: center; min-height: 400px; background: rgba(0,0,0,0.8); padding: 20px;">
-            <img :src="singleImagePreviewUrl" style="max-width: 100%; max-height: 85vh; object-fit: contain;" />
+            <AuthenticatedImage
+              v-if="singleImagePreviewUrl"
+              class="single-image-preview"
+              :src="singleImagePreviewUrl"
+              alt="图片预览"
+              :open-in-new-tab="false"
+            />
         </div>
     </a-modal>
 
@@ -802,12 +836,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue';
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { message } from 'ant-design-vue';
 import { DeleteOutlined } from '@ant-design/icons-vue';
 import { marked } from 'marked'; // 需确保已安装 marked
 import * as api from '@/apis/multimodal';
-import { clampPage, paginateItems } from '@/utils/pagination.mjs';
+import AuthenticatedImage from '@/components/AuthenticatedImage.vue';
 import {
   getSearchResultFileId,
   getSearchResultSourceRows,
@@ -840,12 +874,13 @@ const fileColumns = [
 
 // 图片管理相关
 const imageList = ref([]);
+const imageTotal = ref(0);
 const imageLoading = ref(false);
 const savingImageDescs = ref(false);
 const imagePage = ref(1);
 const imagePageSize = ref(24);
 const imagePageSizeOptions = ['12', '24', '48'];
-const pagedImageList = computed(() => paginateItems(imageList.value, imagePage.value, imagePageSize.value));
+let imageRequestController = null;
 
 // 数值表格相关
 const currentSheetData = ref([]);
@@ -889,7 +924,9 @@ const selectKb = (kb) => {
   currentKbId.value = kb.kbId;
   currentKbName.value = kb.kbName;
   imageList.value = [];
+  imageTotal.value = 0;
   imagePage.value = 1;
+  imageRequestController?.abort();
   loadFiles();
   // 懒加载其他 Tab 数据
   if (detailTab.value === 'images') loadImages();
@@ -934,22 +971,37 @@ const batchAction = async (type) => {
 // 图片加载
 const loadImages = async ({ keepPage = false } = {}) => {
   if (!currentKbId.value) return;
-  const previousPage = imagePage.value;
+  if (!keepPage) imagePage.value = 1;
+  const requestedKbId = currentKbId.value;
+  const requestedPage = imagePage.value;
+  const requestedPageSize = imagePageSize.value;
+  imageRequestController?.abort();
+  const requestController = new AbortController();
+  imageRequestController = requestController;
   imageLoading.value = true;
   try {
-    const res = await api.getKbImages({ kbId: currentKbId.value });
-    imageList.value = res.images || [];
-    imagePage.value = keepPage
-      ? clampPage(previousPage, imageList.value.length, imagePageSize.value)
-      : 1;
+    const res = await api.getKbImages(
+      { kbId: requestedKbId, page: requestedPage, pageSize: requestedPageSize },
+      requestController.signal,
+    );
+    if (requestController.signal.aborted || currentKbId.value !== requestedKbId) return;
+    imageList.value = res.items || [];
+    imageTotal.value = Number(res.total) || 0;
+    imagePage.value = Number(res.page) || requestedPage;
+    imagePageSize.value = Number(res.pageSize) || requestedPageSize;
+  } catch (error) {
+    if (error?.name !== 'CanceledError' && error?.name !== 'AbortError' && error?.code !== 'ERR_CANCELED') {
+      message.error(error.message || '图片目录加载失败');
+    }
   } finally {
-    imageLoading.value = false;
+    if (imageRequestController === requestController) imageLoading.value = false;
   }
 };
 
 const handleImagePageChange = (page, pageSize) => {
   imagePageSize.value = Number(pageSize) || imagePageSize.value;
-  imagePage.value = clampPage(page, imageList.value.length, imagePageSize.value);
+  imagePage.value = Number(page) || 1;
+  loadImages({ keepPage: true });
 };
 
 // 构建图片 URL 的统一方法
@@ -968,9 +1020,9 @@ const getImageKey = (img, idx) => {
 };
 const saveAllImageDescs = async () => {
   if (!currentKbId.value) return message.warning('请先选择知识库');
-  if (!pagedImageList.value.length) return message.info('当前页暂无图片描述可保存');
+  if (!imageList.value.length) return message.info('当前页暂无图片描述可保存');
 
-  const grouped = pagedImageList.value.reduce((acc, img) => {
+  const grouped = imageList.value.reduce((acc, img) => {
     const fileId = img.fileId || img.file_id || img.fileName;
     const imgName = img.img_name || img.imageName || img.image_path || img.name;
     if (!fileId || !imgName) return acc;
@@ -1058,6 +1110,13 @@ const previewFileRecord = ref(null);
 const previewPageMode = ref('original'); // 'original' | 'parsed'
 const previewImages = ref([]);
 const previewImageSummaries = ref([]);
+
+const clearFilePreview = () => {
+  previewContent.value = '';
+  previewFileRecord.value = null;
+  previewImages.value = [];
+  previewImageSummaries.value = [];
+};
 
 const previewFile = async (record) => {
   previewFileRecord.value = record;
@@ -1920,6 +1979,8 @@ watch(activeTab, (val) => {
 onMounted(() => {
   loadKbList();
 });
+
+onBeforeUnmount(() => imageRequestController?.abort());
 </script>
 
 <style scoped>
@@ -2027,9 +2088,14 @@ onMounted(() => {
   align-items: center;
   background: #000;
 }
-.img-wrapper img {
+.img-wrapper :deep(.authenticated-image) {
+  width: 100%;
+  height: 100%;
+}
+.img-wrapper :deep(img) {
   max-width: 100%;
   max-height: 100%;
+  aspect-ratio: auto;
 }
 .img-meta-info {
   font-size: 12px;
@@ -2050,11 +2116,29 @@ onMounted(() => {
   gap: 12px;
   width: 100%;
 }
-.preview-image-row img {
+.preview-image-row :deep(.authenticated-image) {
+  width: 96px;
+  height: 72px;
+}
+.preview-image-row :deep(img) {
   width: 96px;
   height: 72px;
   object-fit: contain;
   background: #111;
+}
+:deep(.single-image-preview) {
+  width: 100%;
+}
+:deep(.single-image-preview img) {
+  width: 100%;
+  max-height: 85vh;
+  aspect-ratio: auto;
+  object-fit: contain;
+}
+:deep(.page-preview-image img) {
+  max-width: 100%;
+  height: auto;
+  aspect-ratio: auto;
 }
 .image-summary {
   margin-top: 6px;

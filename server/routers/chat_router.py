@@ -6,11 +6,12 @@ import uuid
 import time
 from datetime import datetime # [新增] 导入 datetime
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-import requests
+import httpx
+from starlette.background import BackgroundTask
 
 from src import executor, config, retriever
 from src.core import HistoryManager
@@ -21,6 +22,7 @@ from src.agents.tools_factory import get_all_tools
 from server.utils.auth_middleware import get_superadmin_user
 from server.services.access_control import assert_chat_features_allowed
 from server.services.model_credentials import resolve_model_for_user
+from server.services.http_clients import get_multimodal_client
 from fastapi import BackgroundTasks # [新增]
 from server.db_manager import db_manager # [新增] 用于在后台任务中获取独立session
 from server.models.statistics_model import Question
@@ -28,7 +30,11 @@ from server.utils.auth_middleware import get_required_user, get_db
 from server.models.user_model import User
 from server.models.thread_model import Thread
 from server.models.chat_model import ChatRecord, ExamPapersRecord, GuideRecord, ItemRecord, WriterRecord
-from server.utils.multimodal_remote import get_multimodal_api_base, normalize_multimodal_kbs
+from server.utils.multimodal_remote import (
+    get_multimodal_api_base,
+    normalize_multimodal_image_path,
+    normalize_multimodal_kbs,
+)
 
 chat = APIRouter(prefix="/chat")
 
@@ -36,12 +42,11 @@ chat = APIRouter(prefix="/chat")
 @chat.get("/multimodal/kbs")
 async def get_multimodal_kbs(current_user: User = Depends(get_required_user)):
     base_url = get_multimodal_api_base()
-    timeout = float(os.getenv("MULTIMODAL_KB_TIMEOUT") or 30)
     try:
-        resp = requests.get(f"{base_url}/kb/list", timeout=timeout)
+        resp = await get_multimodal_client().get(f"{base_url}/kb/list")
         resp.raise_for_status()
         payload = resp.json()
-    except Exception as e:
+    except (httpx.HTTPError, ValueError) as e:
         logger.error(f"Multimodal kb list proxy error: {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=502, detail=f"澶氭ā鎬佺煡璇嗗簱鍒楄〃鍔犺浇澶辫触: {e}")
 
@@ -59,21 +64,28 @@ async def get_multimodal_image(
         current_user: User = Depends(get_required_user),
         ):
     base_url = get_multimodal_api_base()
+    safe_image_path = normalize_multimodal_image_path(imagePath)
+    if not safe_image_path:
+        raise HTTPException(status_code=400, detail="图片路径无效")
+
     try:
-        resp = requests.get(
+        client = get_multimodal_client()
+        upstream_request = client.build_request(
+            "GET",
             f"{base_url}/pdf/images",
-            params={"kbId": kbId, "fileId": fileId, "imagePath": imagePath},
-            timeout=30,
+            params={"kbId": kbId, "fileId": fileId, "imagePath": safe_image_path},
         )
-        resp.raise_for_status()
-    except Exception as e:
+        resp = await client.send(upstream_request, stream=True)
+    except httpx.HTTPError as e:
         logger.error(f"Multimodal image proxy error: {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=502, detail=f"多模态图片加载失败: {e}")
 
-    return Response(
-        content=resp.content,
+    return StreamingResponse(
+        resp.aiter_bytes(chunk_size=1024 * 64),
+        status_code=resp.status_code,
         media_type=resp.headers.get("content-type", "image/png"),
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": resp.headers.get("cache-control", "private, max-age=3600")},
+        background=BackgroundTask(resp.aclose),
     )
 
 

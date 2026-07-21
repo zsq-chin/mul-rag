@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from server.routers import router
+from server.services.http_clients import multimodal_client_lifespan
 from server.utils.auth_middleware import is_public_path
 from src.utils.logging_config import logger
 
@@ -17,7 +18,7 @@ load_dotenv(env_path)
 logger.info(f"加载环境变量文件: {env_path}")
 
 
-app = FastAPI()
+app = FastAPI(lifespan=multimodal_client_lifespan)
 app.include_router(router, prefix="/api")
 
 # CORS 设置

@@ -2,7 +2,7 @@ import json
 import os
 import re
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import unquote, urlencode, urlsplit
 
 import requests
 
@@ -145,15 +145,67 @@ def _image_proxy_url(kb_id: str, file_id: str, image_path: str) -> str:
     return f"/api/chat/multimodal/image?{query}"
 
 
-def _extract_images(text: str, kb_id: str | None, file_id: str | None, source_meta: dict[str, Any]) -> list[dict[str, str]]:
+def _normalize_image_path(value: Any) -> str | None:
+    raw_path = str(value or "").strip()
+    if not raw_path or "\x00" in raw_path:
+        return None
+
+    decoded_path = unquote(raw_path).replace("\\", "/")
+    if "\x00" in decoded_path:
+        return None
+    parsed = urlsplit(decoded_path)
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        return None
+    if decoded_path.startswith("/") or re.match(r"^[A-Za-z]:", decoded_path):
+        return None
+
+    parts = [part for part in decoded_path.split("/") if part not in ("", ".")]
+    if not parts or any(part == ".." for part in parts):
+        return None
+
+    return parts[-1]
+
+
+def normalize_multimodal_image_path(value: Any) -> str | None:
+    return _normalize_image_path(value)
+
+
+def _iter_image_candidates(value: Any, inherited_alt: str = ""):
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_image_candidates(item, inherited_alt)
+        return
+
+    if isinstance(value, dict):
+        alt = str(value.get("alt") or value.get("caption") or value.get("label") or inherited_alt or "")
+        for key in ("image_path", "imagePath", "img_name", "path", "name"):
+            if value.get(key):
+                yield value[key], alt
+                return
+        for key in ("images", "referenced_images"):
+            if value.get(key):
+                yield from _iter_image_candidates(value[key], alt)
+        return
+
+    if isinstance(value, str) and value.strip():
+        yield value, inherited_alt
+
+
+def _extract_images(
+    item: dict[str, Any],
+    text: str,
+    kb_id: str | None,
+    file_id: str | None,
+    source_meta: dict[str, Any],
+) -> list[dict[str, str]]:
     if not kb_id or not file_id:
         return []
 
     images: list[dict[str, str]] = []
     seen: set[str] = set()
 
-    def add_image(path: str, alt: str = ""):
-        image_path = str(path or "").strip()
+    def add_image(path: Any, alt: str = ""):
+        image_path = _normalize_image_path(path)
         if not image_path or image_path in seen:
             return
         seen.add(image_path)
@@ -169,10 +221,73 @@ def _extract_images(text: str, kb_id: str | None, file_id: str | None, source_me
     for match in MARKDOWN_IMAGE_RE.finditer(text or ""):
         add_image(match.group(2), match.group(1))
 
-    if source_meta.get("image_path"):
-        add_image(str(source_meta["image_path"]), str(source_meta.get("caption") or ""))
+    for container in (source_meta, item):
+        default_alt = str(container.get("caption") or container.get("alt") or "")
+        for key in ("image_path", "imagePath", "img_name", "images", "referenced_images"):
+            for path, alt in _iter_image_candidates(container.get(key), default_alt):
+                add_image(path, alt)
 
     return images
+
+
+def normalize_multimodal_image_page(payload: Any, page: int = 1, page_size: int = 24) -> dict[str, Any]:
+    safe_page = max(1, int(page or 1))
+    safe_page_size = min(100, max(1, int(page_size or 24)))
+
+    containers = [payload]
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        containers.append(payload["data"])
+
+    items: list[Any] = []
+    metadata: dict[str, Any] = {}
+    for container in containers:
+        if isinstance(container, list):
+            items = container
+            break
+        if not isinstance(container, dict):
+            continue
+        for key in ("items", "images", "results", "data"):
+            value = container.get(key)
+            if isinstance(value, list):
+                items = value
+                metadata = container
+                break
+        if items or metadata:
+            break
+
+    is_remote_page = bool(
+        metadata
+        and "total" in metadata
+        and any(key in metadata for key in ("page", "pageSize", "page_size"))
+    )
+    if is_remote_page:
+        total = max(0, int(metadata.get("total") or 0))
+        remote_page = max(1, int(metadata.get("page") or safe_page))
+        remote_page_size = min(
+            100,
+            max(1, int(metadata.get("pageSize") or metadata.get("page_size") or safe_page_size)),
+        )
+        if len(items) > remote_page_size:
+            if len(items) == total:
+                start = (remote_page - 1) * remote_page_size
+                items = items[start : start + remote_page_size]
+            else:
+                items = items[:remote_page_size]
+        return {
+            "items": items,
+            "page": remote_page,
+            "pageSize": remote_page_size,
+            "total": total,
+        }
+
+    total = len(items)
+    start = (safe_page - 1) * safe_page_size
+    return {
+        "items": items[start : start + safe_page_size],
+        "page": safe_page,
+        "pageSize": safe_page_size,
+        "total": total,
+    }
 
 
 def normalize_multimodal_results(payload: Any, kb_id: str | None = None) -> list[dict[str, Any]]:
@@ -190,6 +305,19 @@ def normalize_multimodal_results(payload: Any, kb_id: str | None = None) -> list
         )
         page = item.get("page") or item.get("page_number") or source_meta.get("page") or source_meta.get("page_number")
 
+        images = _extract_images(item, text, kb_id, file_id, source_meta)
+        remote_content_type = (
+            item.get("contentType")
+            or item.get("content_type")
+            or item.get("type")
+            or source_meta.get("type")
+        )
+        content_type = (
+            "table"
+            if re.search(r"<table\b", text, re.IGNORECASE)
+            else str(remote_content_type or ("image" if images and not text else "text"))
+        )
+
         normalized.append(
             {
                 "id": item.get("id") or item.get("citation_id") or index,
@@ -201,7 +329,8 @@ def normalize_multimodal_results(payload: Any, kb_id: str | None = None) -> list
                 "source": item.get("source"),
                 "metadata": source_meta,
                 "previewUrl": item.get("previewUrl") or item.get("preview_url"),
-                "images": _extract_images(text, kb_id, file_id, source_meta),
+                "contentType": content_type,
+                "images": images,
                 "text": text,
                 "raw": item,
             }

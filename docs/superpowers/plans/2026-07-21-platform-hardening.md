@@ -835,8 +835,12 @@ git commit -m "fix(chat): render safe tables and responsive images"
 - Modify: `server/routers/chat_router.py`
 - Modify: `server/routers/multimodal_proxy_router.py`
 - Modify: `test/test_multimodal_remote.py`
+- Create: `test/test_http_clients.py`
 - Modify: `web/src/apis/multimodal.js`
 - Modify: `web/src/views/MultimodalKbView.vue`
+- Modify: `web/src/components/AuthenticatedImage.vue`
+- Create: `web/src/utils/lazy-image.mjs`
+- Create: `web/tests/lazy-image.test.mjs`
 - Modify: `web/src/components/RefsSidebar.vue`
 
 **Interfaces:**
@@ -844,7 +848,7 @@ git commit -m "fix(chat): render safe tables and responsive images"
 - Produces reusable `get_multimodal_client() -> httpx.AsyncClient` with lifecycle close.
 - Produces server-paged image metadata `{items, page, pageSize, total}`.
 
-- [ ] **Step 1: Extend normalization tests with real remote shapes**
+- [x] **Step 1: Extend normalization tests with real remote shapes**
 
 ```python
 def test_referenced_images_and_image_path_are_deduplicated(self):
@@ -866,25 +870,25 @@ def test_complex_html_table_is_preserved_as_table_content(self):
     self.assertIn("rowspan", result["text"])
 ```
 
-- [ ] **Step 2: Run focused tests and verify the new cases fail**
+- [x] **Step 2: Run focused tests and verify the new cases fail**
 
 Run: `python -m unittest test.test_multimodal_remote -v`
 
 Expected: failures for `referenced_images` and `contentType`.
 
-- [ ] **Step 3: Complete image-field normalization and path validation**
+- [x] **Step 3: Complete image-field normalization and path validation**
 
 Accept string/list/dict forms from `image_path`, `imagePath`, `img_name`, `images`, and `referenced_images`. Normalize `./images/name.png`, `images/name.png`, and `name.png` to the basename expected by `/pdf/images`; reject absolute paths, URLs, NUL, and `..` segments. Deduplicate by normalized case-sensitive path while preserving source order. Set `contentType = 'table'` for HTML tables, otherwise remote type or `image`/`text`.
 
-- [ ] **Step 4: Replace blocking proxies with streaming async HTTP**
+- [x] **Step 4: Replace blocking proxies with streaming async HTTP**
 
 Add `httpx>=0.28.1`. Create one application-scoped client with limits and connect/read/write/pool timeouts. Build upstream requests with `client.build_request`, use `await client.send(request, stream=True)`, and return `StreamingResponse(response.aiter_bytes(64 * 1024), background=BackgroundTask(response.aclose))`. Forward only allowlisted cache/content headers. Use `get_required_user` on KB list and chat image retrieval routes, and `get_superadmin_user` on generic multimodal management proxy routes.
 
-- [ ] **Step 5: Stop loading the complete image catalog**
+- [x] **Step 5: Stop loading the complete image catalog**
 
 Change `MultimodalKbView.vue` from `getAllKbImages` plus client slicing to `getKbImages({ kbId, page, pageSize })`. Store only current-page `items` and server `total`. Abort the previous request when page/KB changes, use 24 items by default, and render only current-page thumbnail URLs. On modal close, clear preview arrays so detached images can be reclaimed. If the remote API returns an unpaged list, the main proxy slices metadata before returning and never fetches binary images eagerly.
 
-- [ ] **Step 6: Verify unit, remote, and build behavior**
+- [x] **Step 6: Verify unit, remote, and build behavior**
 
 Run: `python -m unittest test.test_multimodal_remote -v`
 
@@ -898,10 +902,10 @@ Expected: Vite build exits 0.
 
 Browser acceptance: open image management, move across at least three pages, and return. Network shows only one metadata page and current-page images at a time; the tab remains responsive and memory stabilizes after closing previews.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
-git add pyproject.toml uv.lock server/services/http_clients.py server/main.py server/utils/multimodal_remote.py server/routers/chat_router.py server/routers/multimodal_proxy_router.py test/test_multimodal_remote.py web/src/apis/multimodal.js web/src/views/MultimodalKbView.vue web/src/components/RefsSidebar.vue
+git add server/services/http_clients.py server/main.py server/utils/multimodal_remote.py server/routers/chat_router.py server/routers/multimodal_proxy_router.py test/test_multimodal_remote.py test/test_http_clients.py web/src/apis/multimodal.js web/src/views/MultimodalKbView.vue web/src/components/AuthenticatedImage.vue web/src/utils/lazy-image.mjs web/tests/lazy-image.test.mjs
 git commit -m "fix(multimodal): stream and page normalized images"
 ```
 
