@@ -752,7 +752,7 @@ git commit -m "feat(theme): add persistent light and dark modes"
 - Produces: `renderRichContent(input: string, window: Window) -> string`.
 - Produces: reusable component accepting `content` and optional normalized `images`.
 
-- [ ] **Step 1: Add failing sanitizer tests**
+- [x] **Step 1: Add failing sanitizer tests**
 
 ```javascript
 // web/tests/richContent.test.mjs
@@ -776,7 +776,7 @@ test('renders markdown table', () => {
 })
 ```
 
-- [ ] **Step 2: Add dependencies and verify failure**
+- [x] **Step 2: Add dependencies and verify failure**
 
 Add runtime `dompurify` and dev `jsdom` dependencies, then run `pnpm --dir web install` so `pnpm-lock.yaml` is updated.
 
@@ -784,7 +784,7 @@ Run: `pnpm --dir web test`
 
 Expected: module-not-found failure for `richContent.mjs`.
 
-- [ ] **Step 3: Implement marked plus DOMPurify rendering**
+- [x] **Step 3: Implement marked plus DOMPurify rendering**
 
 ```javascript
 // web/src/utils/richContent.mjs
@@ -804,11 +804,11 @@ export function renderRichContent(input, window) {
 
 `RichReferenceContent.vue` computes sanitized HTML using `window`, renders it inside `.rich-reference-scroll`, and renders deduplicated standalone images only when their URL is not already present in the HTML. It adds `loading="lazy"`, a fixed thumbnail aspect ratio, error placeholder, and click-to-preview modal.
 
-- [ ] **Step 4: Replace text interpolation and fixed preview IDs**
+- [x] **Step 4: Replace text interpolation and fixed preview IDs**
 
 Use `RichReferenceContent` for ordinary and multimodal result text in `RefsSidebar.vue`. In `MessageComponent.vue`, derive the Markdown editor ID from message ID, for example `preview-${props.message.id}`, so multiple answers cannot share DOM state. Add horizontal overflow for tables and `max-width: 100%; height: auto` for answer images.
 
-- [ ] **Step 5: Verify sanitizer tests and build**
+- [x] **Step 5: Verify sanitizer tests and build**
 
 Run: `pnpm --dir web test`
 
@@ -818,7 +818,7 @@ Run: `pnpm --dir web build`
 
 Expected: Vite build exits 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add web/package.json web/pnpm-lock.yaml web/src/utils/richContent.mjs web/src/components/RichReferenceContent.vue web/tests/richContent.test.mjs web/src/components/MessageComponent.vue web/src/components/RefsSidebar.vue

@@ -44,7 +44,7 @@
       <!-- 消息内容 -->
       <!-- <div v-else-if="message.content" v-html="renderMarkdown(message)" class="message-md"></div> -->
       <MdPreview v-else-if="message.content" ref="editorRef"
-        editorId="preview-only"
+        :editorId="editorId"
         previewTheme="github"
         :showCodeRowNumber="false"
         :modelValue="message.content"
@@ -90,7 +90,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, ref, useId } from 'vue';
 import { CaretRightOutlined } from '@ant-design/icons-vue';
 import RefsComponent from '@/components/RefsComponent.vue'
 
@@ -131,6 +131,11 @@ const props = defineProps({
 });
 
 const editorRef = ref()
+const fallbackEditorId = useId().replace(/[^a-zA-Z0-9_-]/g, '-')
+const editorId = computed(() => {
+  const messageId = String(props.message.id ?? fallbackEditorId).replace(/[^a-zA-Z0-9_-]/g, '-')
+  return `preview-${messageId}`
+})
 const statusDefination = {
   init: '初始化',
   loading: '加载中',
@@ -454,8 +459,19 @@ const isEmptyAndLoading = computed(() => {
   padding: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans SC', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', 'Hiragino Sans GB', 'Source Han Sans CN', 'Courier New', monospace;
 
-  #preview-only-preview {
+  [id$='-preview'] {
     font-size: 15px;
+  }
+
+  table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  img {
+    max-width: 100%;
+    height: auto;
   }
 
   h1, h2 {
@@ -493,7 +509,7 @@ const isEmptyAndLoading = computed(() => {
   }
 }
 
-.chat-box.font-smaller #preview-only-preview {
+.chat-box.font-smaller .message-md [id$='-preview'] {
   font-size: 14px;
 
   h1, h2 {
@@ -505,7 +521,7 @@ const isEmptyAndLoading = computed(() => {
   }
 }
 
-.chat-box.font-larger #preview-only-preview {
+.chat-box.font-larger .message-md [id$='-preview'] {
   font-size: 16px;
 
   h1, h2 {

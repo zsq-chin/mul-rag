@@ -1,14 +1,15 @@
 <template>
-  <a
+  <component
+    :is="openInNewTab ? 'a' : 'div'"
     v-if="objectUrl"
-    :href="objectUrl"
-    target="_blank"
-    rel="noopener noreferrer"
+    :href="openInNewTab ? objectUrl : undefined"
+    :target="openInNewTab ? '_blank' : undefined"
+    :rel="openInNewTab ? 'noopener noreferrer' : undefined"
     class="authenticated-image"
   >
     <img :src="objectUrl" :alt="alt" loading="lazy" />
     <span>{{ label }}</span>
-  </a>
+  </component>
   <div v-else class="authenticated-image authenticated-image-state" :aria-label="alt">
     <a-spin v-if="loading" size="small" />
     <span v-else>{{ error || label }}</span>
@@ -24,6 +25,7 @@ const props = defineProps({
   src: { type: String, required: true },
   alt: { type: String, default: '' },
   label: { type: String, default: '' },
+  openInNewTab: { type: Boolean, default: true },
 })
 
 const userStore = useUserStore()

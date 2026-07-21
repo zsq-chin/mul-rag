@@ -78,7 +78,7 @@
                         </div>
                         <div class="result-id">ID: #{{ res.id }}</div>
                       </div>
-                      <div class="result-text">{{ res.entity.text }}</div>
+                      <RichReferenceContent class="result-text" :content="res.entity.text" />
                     </div>
                   </div>
                 </a-collapse-panel>
@@ -127,16 +127,7 @@
                         </div>
                         <div class="result-id">ID: #{{ res.id || res.rank }}</div>
                       </div>
-                      <div class="result-text">{{ res.text }}</div>
-                      <div v-if="res.images && res.images.length" class="multimodal-images">
-                        <AuthenticatedImage
-                          v-for="image in res.images"
-                          :key="image.url"
-                          :src="image.url"
-                          :alt="image.alt || image.name"
-                          :label="image.alt || image.name"
-                        />
-                      </div>
+                      <RichReferenceContent class="result-text" :content="res.text" :images="res.images" />
                     </div>
                   </div>
                 </a-collapse-panel>
@@ -164,7 +155,7 @@ import {
   PushpinOutlined
 } from '@ant-design/icons-vue'
 import GraphContainer from './GraphContainer.vue'
-import AuthenticatedImage from './AuthenticatedImage.vue'
+import RichReferenceContent from './RichReferenceContent.vue'
 import { useUserStore } from '@/stores/user'
 import { canUseGraph, canUseKnowledgeRetrieval } from '@/utils/access.mjs'
 
@@ -763,36 +754,6 @@ defineExpose({
     .status-error {
       color: var(--error-color);
       font-weight: 600;
-    }
-  }
-
-  .multimodal-images {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: 12px;
-    margin-top: 12px;
-
-    .multimodal-image-link {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      color: var(--gray-700);
-      text-decoration: none;
-
-      img {
-        width: 100%;
-        aspect-ratio: 4 / 3;
-        object-fit: contain;
-        background: var(--gray-100);
-        border: 1px solid var(--gray-200);
-        border-radius: 4px;
-      }
-
-      span {
-        font-size: 12px;
-        line-height: 1.4;
-        word-break: break-word;
-      }
     }
   }
 
