@@ -2,7 +2,7 @@ from fastapi import Request, Body, Depends
 from fastapi import APIRouter
 
 from src import config, retriever, knowledge_base, graph_base
-from server.utils.auth_middleware import get_admin_user, get_superadmin_user
+from server.utils.auth_middleware import get_superadmin_user
 from server.models.user_model import User
 
 
@@ -19,14 +19,14 @@ async def health_check():
 
 # Depends = “告诉 FastAPI：在调用我之前，先帮我执行这个依赖函数，并把结果传给我”。
 @base.get("/config")
-def get_config(current_user: User = Depends(get_admin_user)):
+def get_config(current_user: User = Depends(get_superadmin_user)):
     return config.dump_config()
 
 @base.post("/config")
 async def update_config(
     key = Body(...),
     value = Body(...),
-    current_user: User = Depends(get_admin_user)
+    current_user: User = Depends(get_superadmin_user)
 ) -> dict:
     config[key] = value
     config.save()
@@ -35,7 +35,7 @@ async def update_config(
 @base.post("/config/update")
 async def update_config_item(
     items: dict = Body(...),
-    current_user: User = Depends(get_admin_user)
+    current_user: User = Depends(get_superadmin_user)
 ) -> dict:
     config.update(items)
     config.save()
@@ -49,7 +49,7 @@ async def restart(current_user: User = Depends(get_superadmin_user)):
     return {"message": "Restarted!"}
 
 @base.get("/log")
-def get_log(current_user: User = Depends(get_admin_user)):
+def get_log(current_user: User = Depends(get_superadmin_user)):
     from src.utils.logging_config import LOG_FILE
     from collections import deque
 
@@ -58,5 +58,3 @@ def get_log(current_user: User = Depends(get_admin_user)):
 
     log = ''.join(last_lines)
     return {"log": log, "message": "success", "log_file": LOG_FILE}
-
-

@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
 from server.models.user_model import User
-from server.utils.auth_middleware import get_required_user
+from server.utils.auth_middleware import get_superadmin_user
 from server.utils.multimodal_remote import (
     build_multimodal_remote_url,
     filter_multimodal_proxy_headers,
@@ -37,7 +37,7 @@ def _forward_response_headers(headers: requests.structures.CaseInsensitiveDict) 
 async def proxy_multimodal_request(
     path: str,
     request: Request,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(get_superadmin_user),
 ):
     try:
         remote_url = build_multimodal_remote_url(path, get_multimodal_api_base())

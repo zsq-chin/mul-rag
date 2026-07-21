@@ -9,6 +9,8 @@ from pydantic import BaseModel
 
 from server.db_manager import db_manager
 from server.models.statistics_model import Question, Discussion, HelpRequest
+from server.models.user_model import User
+from server.utils.auth_middleware import get_superadmin_user
 from src.utils.logging_config import logger
 
 router = APIRouter(prefix="/statistics", tags=["Statistics"])
@@ -68,7 +70,7 @@ def seed_initial_data(db: Session):
 
 # 1. 获取热门问题列表
 @router.get("/top-questions")
-def get_top_questions(limit: int = 10, db: Session = Depends(get_db)):
+def get_top_questions(limit: int = 10, db: Session = Depends(get_db), current_user: User = Depends(get_superadmin_user)):
     # 检查并初始化数据
     seed_initial_data(db)
     
@@ -95,7 +97,7 @@ def get_top_questions(limit: int = 10, db: Session = Depends(get_db)):
 
 # 2. 获取问题的讨论列表
 @router.get("/questions/{question_id}/discussions")
-def get_question_discussions(question_id: int, db: Session = Depends(get_db)):
+def get_question_discussions(question_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_superadmin_user)):
     discussions = db.query(Discussion).filter(Discussion.question_id == question_id).order_by(Discussion.created_at).all()
     
     data = []
@@ -112,7 +114,7 @@ def get_question_discussions(question_id: int, db: Session = Depends(get_db)):
 
 # 3. 发布讨论评论
 @router.post("/questions/{question_id}/discussions")
-def create_discussion(question_id: int, discussion: DiscussionCreate, db: Session = Depends(get_db)):
+def create_discussion(question_id: int, discussion: DiscussionCreate, db: Session = Depends(get_db), current_user: User = Depends(get_superadmin_user)):
     # 验证问题是否存在
     q = db.query(Question).filter(Question.id == question_id).first()
     if not q:
@@ -140,7 +142,7 @@ def create_discussion(question_id: int, discussion: DiscussionCreate, db: Sessio
 
 # 4. 发布求助
 @router.post("/help-requests")
-def create_help_request(request: HelpRequestCreate, db: Session = Depends(get_db)):
+def create_help_request(request: HelpRequestCreate, db: Session = Depends(get_db), current_user: User = Depends(get_superadmin_user)):
     q = db.query(Question).filter(Question.id == request.questionId).first()
     if not q:
         raise HTTPException(status_code=404, detail="Question not found")

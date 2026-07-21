@@ -10,7 +10,12 @@ from server.db_manager import db_manager
 from server.models.user_model import User, OperationLog
 from server.models.cas_session_model import CASSession
 from server.utils.auth_utils import AuthUtils
-from server.utils.auth_middleware import get_db, get_current_user, get_admin_user, get_superadmin_user, oauth2_scheme
+from server.utils.auth_middleware import get_db, get_current_user, get_required_user, get_admin_user, get_superadmin_user, oauth2_scheme
+from server.services.access_control import (
+    assert_role_assignment_allowed,
+    assert_superadmin_transition_allowed,
+    can_manage_target,
+)
 from server.utils.cas_utils import CASUtils
 from server.utils.cas_cleanup import cleanup_expired_cas_sessions, get_cas_session_stats
 
@@ -186,7 +191,7 @@ async def initialize_admin(
 
 # 路由：获取当前用户信息
 @auth.get("/me", response_model=UserResponse)
-async def read_users_me(current_user: User = Depends(get_current_user)):
+async def read_users_me(current_user: User = Depends(get_required_user)):
     return current_user.to_dict()
 
 # CAS认证相关路由
@@ -359,7 +364,7 @@ async def exchange_session_token(
 # CAS Session管理接口（管理员权限）
 @auth.post("/cas/cleanup")
 async def cleanup_cas_sessions(
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_superadmin_user),
     db: Session = Depends(get_db)
 ):
     """清理过期的CAS Session记录"""
@@ -373,7 +378,7 @@ async def cleanup_cas_sessions(
 
 @auth.get("/cas/stats")
 async def get_cas_session_stats(
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_superadmin_user),
     db: Session = Depends(get_db)
 ):
     """获取CAS Session统计信息"""
@@ -403,25 +408,12 @@ async def create_user(
     # 创建新用户
     hashed_password = AuthUtils.hash_password(user_data.password)
 
-    # 检查角色权限
-    # 超级管理员可以创建任何类型的用户
-    if user_data.role == "superadmin" and current_user.role != "superadmin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="只有超级管理员才能创建超级管理员账户",
-        )
-
-    # 管理员只能创建普通用户
-    if current_user.role == "admin" and user_data.role != "user":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="管理员只能创建普通用户账户",
-        )
+    role = assert_role_assignment_allowed(current_user, user_data.role)
 
     new_user = User(
         username=user_data.username,
         password_hash=hashed_password,
-        role=user_data.role
+        role=role
     )
 
     db.add(new_user)
@@ -447,7 +439,10 @@ async def read_users(
     current_user: User = Depends(get_admin_user),
     db: Session = Depends(get_db)
 ):
-    users = db.query(User).offset(skip).limit(limit).all()
+    query = db.query(User)
+    if current_user.role == "admin":
+        query = query.filter(User.role == "user")
+    users = query.order_by(User.id).offset(skip).limit(min(limit, 100)).all()
     return [user.to_dict() for user in users]
 
 # 路由：获取特定用户信息（管理员权限）
@@ -462,6 +457,11 @@ async def read_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="用户不存在",
+        )
+    if not can_manage_target(current_user, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权管理该用户",
         )
     return user.to_dict()
 
@@ -481,18 +481,10 @@ async def update_user(
             detail="用户不存在",
         )
 
-    # 检查权限
-    if user.role == "superadmin" and current_user.role != "superadmin":
+    if not can_manage_target(current_user, user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="只有超级管理员才能修改超级管理员账户",
-        )
-
-    # 超级管理员账户不能被降级（只能由其他超级管理员修改）
-    if user.role == "superadmin" and user_data.role and user_data.role != "superadmin" and current_user.id != user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="不能降级超级管理员账户",
+            detail="无权管理该用户",
         )
 
     # 更新信息
@@ -514,7 +506,12 @@ async def update_user(
         update_details.append("密码已更新")
 
     if user_data.role is not None:
-        user.role = user_data.role
+        role = assert_role_assignment_allowed(current_user, user_data.role)
+        superadmin_count = None
+        if user.role == "superadmin" and role != "superadmin":
+            superadmin_count = db.query(User).filter(User.role == "superadmin").count()
+        assert_superadmin_transition_allowed(user, role, superadmin_count)
+        user.role = role
         update_details.append(f"角色: {user_data.role}")
 
     db.commit()
@@ -543,6 +540,12 @@ async def delete_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="用户不存在",
+        )
+
+    if not can_manage_target(current_user, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权管理该用户",
         )
 
     # 检查权限

@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 from typing import  Optional
 from server.db_manager_college import db_manager_college
 from server.models_college.college_models import Users, GuideRecords
+from server.models.user_model import User
+from server.utils.auth_middleware import get_superadmin_user
 
 college = APIRouter(prefix="/k80")
 
@@ -15,6 +17,7 @@ def get_users(
     username: Optional[str] = None,
     role: Optional[str] = None,
     db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_superadmin_user),
 ):
     """查询用户列表"""
     query = db.query(Users)
@@ -30,6 +33,7 @@ def get_users(
 def get_user(
     user_id: int,
     db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_superadmin_user),
 ):
     """根据ID查询用户详情"""
     user = db.query(Users).filter(Users.id == user_id).first()
@@ -42,6 +46,7 @@ def get_guide_records(
     guide_id: Optional[str] = None,
     user_id: Optional[int] = None,
     db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_superadmin_user),
 ):
     """查询指南记录列表"""
     query = db.query(GuideRecords)
@@ -57,6 +62,7 @@ def get_guide_records(
 def get_guide_record(
     record_id: int,
     db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_superadmin_user),
 ):
     """根据ID查询指南记录详情"""
     record = db.query(GuideRecords).filter(GuideRecords.id == record_id).first()
@@ -68,6 +74,7 @@ def get_guide_record(
 def get_user_guide_records(
     user_id: int,
     db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_superadmin_user),
 ):
     """查询用户的所有指南记录"""
     user = db.query(Users).filter(Users.id == user_id).first()

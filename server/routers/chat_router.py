@@ -18,7 +18,8 @@ from src.agents import agent_manager
 from src.models import select_model
 from src.utils.logging_config import logger
 from src.agents.tools_factory import get_all_tools
-from server.routers.auth_router import get_admin_user
+from server.utils.auth_middleware import get_superadmin_user
+from server.services.access_control import assert_chat_features_allowed
 from fastapi import BackgroundTasks # [新增]
 from server.db_manager import db_manager # [新增] 用于在后台任务中获取独立session
 from server.models.statistics_model import Question
@@ -32,7 +33,7 @@ chat = APIRouter(prefix="/chat")
 
 
 @chat.get("/multimodal/kbs")
-async def get_multimodal_kbs(current_user: User = Depends(get_required_user)):
+async def get_multimodal_kbs(current_user: User = Depends(get_superadmin_user)):
     base_url = get_multimodal_api_base()
     timeout = float(os.getenv("MULTIMODAL_KB_TIMEOUT") or 30)
     try:
@@ -54,6 +55,7 @@ async def get_multimodal_image(
         kbId: str = Query(...),
         fileId: str = Query(...),
         imagePath: str = Query(...),
+        current_user: User = Depends(get_superadmin_user),
         ):
     base_url = get_multimodal_api_base()
     try:
@@ -181,7 +183,7 @@ async def get_default_agent(current_user: User = Depends(get_required_user)):
         raise HTTPException(status_code=500, detail=f"获取默认智能体出错: {str(e)}")
 
 @chat.post("/set_default_agent")
-async def set_default_agent(agent_id: str = Body(..., embed=True), current_user = Depends(get_admin_user)):
+async def set_default_agent(agent_id: str = Body(..., embed=True), current_user = Depends(get_superadmin_user)):
     """设置默认智能体ID (仅管理员)"""
     try:
         # 验证智能体是否存在
@@ -234,6 +236,9 @@ async def chat_post(
         background_tasks: BackgroundTasks = BackgroundTasks() # [新增] 注入后台任务
         ):
     """处理聊天请求的主要端点（需要登录）"""
+
+    meta = meta or {}
+    assert_chat_features_allowed(current_user, meta)
 
     # [新增] 添加后台任务，不再阻塞主线程
     # 注意：这里不需要传入 db，因为后台任务会自己创建新的 session
@@ -360,6 +365,7 @@ async def chat_post(
 async def call(query: str = Body(...), meta: dict = Body(None), current_user: User = Depends(get_required_user)):
     """调用模型进行简单问答（需要登录）"""
     meta = meta or {}
+    assert_chat_features_allowed(current_user, meta)
     model = select_model(model_provider=meta.get("model_provider"), model_name=meta.get("model_name"))
     async def predict_async(query):
         loop = asyncio.get_event_loop()
@@ -384,6 +390,9 @@ async def chat_agent(agent_name: str,
                meta: dict = Body({}),
                current_user: User = Depends(get_required_user)):
     """使用特定智能体进行对话（需要登录）"""
+
+    meta = meta or {}
+    assert_chat_features_allowed(current_user, meta)
 
     meta.update({
         "query": query,
@@ -445,20 +454,20 @@ async def chat_agent(agent_name: str,
     return StreamingResponse(stream_messages(), media_type='application/json')
 
 @chat.get("/models")
-async def get_chat_models(model_provider: str, current_user: User = Depends(get_admin_user)):
+async def get_chat_models(model_provider: str, current_user: User = Depends(get_superadmin_user)):
     """获取指定模型提供商的模型列表（需要登录）"""
     model = select_model(model_provider=model_provider)
     return {"models": model.get_models()}
 
 @chat.post("/models/update")
-async def update_chat_models(model_provider: str, model_names: list[str], current_user = Depends(get_admin_user)):
+async def update_chat_models(model_provider: str, model_names: list[str], current_user = Depends(get_superadmin_user)):
     """更新指定模型提供商的模型列表 (仅管理员)"""
     config.model_names[model_provider]["models"] = model_names
     config._save_models_to_file()
     return {"models": config.model_names[model_provider]["models"]}
 
 @chat.get("/tools")
-async def get_tools(current_user: User = Depends(get_admin_user)):
+async def get_tools(current_user: User = Depends(get_superadmin_user)):
     """获取所有可用工具（需要登录）"""
     return {"tools": list(get_all_tools().keys())}
 
@@ -466,7 +475,7 @@ async def get_tools(current_user: User = Depends(get_admin_user)):
 async def save_agent_config(
     agent_name: str,
     config: dict = Body(...),
-    current_user: User = Depends(get_admin_user)
+    current_user: User = Depends(get_superadmin_user)
 ):
     """保存智能体配置到YAML文件（需要管理员权限）"""
     try:

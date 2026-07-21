@@ -198,7 +198,7 @@ git commit -m "fix(security): remove embedded secrets and define access policy"
 - Produces: all management routes guarded by `get_superadmin_user`; authenticated chat remains available to all roles.
 - Produces: admin user queries filtered to `User.role == "user"`.
 
-- [ ] **Step 1: Add route-policy regression tests**
+- [x] **Step 1: Add route-policy regression tests**
 
 ```python
 # test/test_role_routes.py
@@ -220,13 +220,13 @@ class RoleRouteTests(unittest.TestCase):
 
 Add an AST-based assertion that each `/data/graph`, `/statistics`, `/multimodal`, `/config`, and `/log` endpoint contains `Depends(get_superadmin_user)`. This test must enumerate every current decorator/function pair so a future unguarded endpoint fails review.
 
-- [ ] **Step 2: Run route tests and confirm current unguarded endpoints fail**
+- [x] **Step 2: Run route tests and confirm current unguarded endpoints fail**
 
 Run: `python -m unittest test.test_role_routes -v`
 
 Expected: failures naming graph, statistics, multimodal, config, log, or college endpoints without superadmin dependency.
 
-- [ ] **Step 3: Apply the dependency and target-user rules**
+- [x] **Step 3: Apply the dependency and target-user rules**
 
 Use `current_user: User = Depends(get_superadmin_user)` on management endpoints. Keep `get_required_user` only for ordinary chat, personal history, personal model endpoints, and `/auth/me`.
 
@@ -247,7 +247,7 @@ if not can_manage_target(current_user, user):
 
 Validate every requested role against `{"superadmin", "admin", "user"}`. Require `get_required_user` for `/auth/me`. Add `assert_chat_features_allowed(current_user, meta)` before retrieval/model execution in both `/chat/` and `/chat/call`.
 
-- [ ] **Step 4: Run role tests and the existing backend suite**
+- [x] **Step 4: Run role tests and the existing backend suite**
 
 Run: `python -m unittest test.test_access_control test.test_role_routes -v`
 
@@ -257,7 +257,7 @@ Run: `python -m unittest discover -s test -v`
 
 Expected: all existing and new tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add server/routers test/test_role_routes.py

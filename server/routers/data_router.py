@@ -16,7 +16,7 @@ from starlette.responses import StreamingResponse
 
 from src.utils import logger, hashstr
 from src import executor, retriever, config, knowledge_base, graph_base
-from server.utils.auth_middleware import get_admin_user
+from server.utils.auth_middleware import get_superadmin_user
 from server.models.user_model import User
 from typing import List, Optional
 from fastapi.responses import JSONResponse
@@ -31,7 +31,7 @@ UPLOAD_DIR = Path("D:\shanhai\sage-master\sage-master\saves\data\graphragfile")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 @data.get("/")
-async def get_databases(current_user: User = Depends(get_admin_user)):
+async def get_databases(current_user: User = Depends(get_superadmin_user)):
     try:
         database = knowledge_base.get_databases()
     except Exception as e:
@@ -44,7 +44,7 @@ async def create_database(
     database_name: str = Body(...),
     description: str = Body(...),
     dimension: int | None = Body(None),
-    current_user: User = Depends(get_admin_user)
+    current_user: User = Depends(get_superadmin_user)
 ):
     logger.debug(f"Create database {database_name}")
     try:
@@ -125,19 +125,19 @@ def convert_to_graph_format(input_csv_path: PathlibPath, output_csv_path: Pathli
     except Exception as e:
         return {"status": "error", "detail": f"文件格式转换失败: {str(e)}"}
 @data.delete("/")
-async def delete_database(db_id, current_user: User = Depends(get_admin_user)):
+async def delete_database(db_id, current_user: User = Depends(get_superadmin_user)):
     logger.debug(f"Delete database {db_id}")
     knowledge_base.delete_database(db_id)
     return {"message": "删除成功"}
 
 @data.post("/query-test")
-async def query_test(query: str = Body(...), meta: dict = Body(...), current_user: User = Depends(get_admin_user)):
+async def query_test(query: str = Body(...), meta: dict = Body(...), current_user: User = Depends(get_superadmin_user)):
     logger.debug(f"Query test in {meta}: {query}")
     result = retriever.query_knowledgebase(query, history=None, refs={"meta": meta})
     return result
 
 @data.post("/file-to-chunk")
-async def file_to_chunk(db_id: str = Body(...), files: list[str] = Body(...), params: dict = Body(...), current_user: User = Depends(get_admin_user)):
+async def file_to_chunk(db_id: str = Body(...), files: list[str] = Body(...), params: dict = Body(...), current_user: User = Depends(get_superadmin_user)):
     logger.debug(f"File to chunk for db_id {db_id}: {files} {params=}")
     try:
         processed_files = await knowledge_base.save_files_for_pending_indexing(db_id, files, params)
@@ -147,7 +147,7 @@ async def file_to_chunk(db_id: str = Body(...), files: list[str] = Body(...), pa
         return {"message": f"Failed to process files for pending indexing: {e}", "status": "failed"}
 
 @data.post("/url-to-chunk")
-async def url_to_chunk(db_id: str = Body(...), urls: list[str] = Body(...), params: dict = Body(...), current_user: User = Depends(get_admin_user)):
+async def url_to_chunk(db_id: str = Body(...), urls: list[str] = Body(...), params: dict = Body(...), current_user: User = Depends(get_superadmin_user)):
     logger.debug(f"Url to chunk for db_id {db_id}: {urls} {params=}")
     try:
         processed_urls = await knowledge_base.save_urls_for_pending_indexing(db_id, urls, params)
@@ -157,15 +157,15 @@ async def url_to_chunk(db_id: str = Body(...), urls: list[str] = Body(...), para
         return {"message": f"Failed to process URLs for pending indexing: {e}", "status": "failed"}
 
 @data.post("/add-by-file")
-async def create_document_by_file(db_id: str = Body(...), files: list[str] = Body(...), current_user: User = Depends(get_admin_user)):
+async def create_document_by_file(db_id: str = Body(...), files: list[str] = Body(...), current_user: User = Depends(get_superadmin_user)):
     raise ValueError("This method is deprecated. Use /file-to-chunk and /index-file instead.")
 
 @data.post("/add-by-chunks")
-async def add_by_chunks(db_id: str = Body(...), file_chunks: dict = Body(...), current_user: User = Depends(get_admin_user)):
+async def add_by_chunks(db_id: str = Body(...), file_chunks: dict = Body(...), current_user: User = Depends(get_superadmin_user)):
     raise ValueError("This method is deprecated. Use /file-to-chunk and /index-file instead.")
 
 @data.post("/index-file")
-async def index_file(db_id: str = Body(...), file_id: str = Body(...), current_user: User = Depends(get_admin_user)):
+async def index_file(db_id: str = Body(...), file_id: str = Body(...), current_user: User = Depends(get_superadmin_user)):
     logger.debug(f"Indexing file_id {file_id} in db_id {db_id}")
     try:
         result = await knowledge_base.trigger_file_indexing(db_id, file_id)
@@ -175,7 +175,7 @@ async def index_file(db_id: str = Body(...), file_id: str = Body(...), current_u
         return {"message": f"Failed to index file {file_id}: {e}", "status": "failed"}
 
 @data.get("/info")
-async def get_database_info(db_id: str, current_user: User = Depends(get_admin_user)):
+async def get_database_info(db_id: str, current_user: User = Depends(get_superadmin_user)):
     # logger.debug(f"Get database {db_id} info")
     database = knowledge_base.get_database_info(db_id)
     if database is None:
@@ -183,13 +183,13 @@ async def get_database_info(db_id: str, current_user: User = Depends(get_admin_u
     return database
 
 @data.delete("/document")
-async def delete_document(db_id: str = Body(...), file_id: str = Body(...), current_user: User = Depends(get_admin_user)):
+async def delete_document(db_id: str = Body(...), file_id: str = Body(...), current_user: User = Depends(get_superadmin_user)):
     logger.debug(f"DELETE document {file_id} info in {db_id}")
     knowledge_base.delete_file(db_id, file_id)
     return {"message": "删除成功"}
 
 @data.get("/document")
-async def get_document_info(db_id: str, file_id: str, current_user: User = Depends(get_admin_user)):
+async def get_document_info(db_id: str, file_id: str, current_user: User = Depends(get_superadmin_user)):
     logger.debug(f"GET document {file_id} info in {db_id}")
 
     try:
@@ -204,7 +204,7 @@ async def get_document_info(db_id: str, file_id: str, current_user: User = Depen
 async def upload_file(
     file: UploadFile = File(...),
     db_id: str | None = Query(None),
-    current_user: User = Depends(get_admin_user)
+    current_user: User = Depends(get_superadmin_user)
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No selected file")
@@ -226,14 +226,14 @@ async def upload_file(
     return {"message": "File successfully uploaded", "file_path": file_path, "db_id": db_id}
 
 @data.get("/graph")
-async def get_graph_info(current_user: User = Depends(get_admin_user)):
+async def get_graph_info(current_user: User = Depends(get_superadmin_user)):
     graph_info = graph_base.get_graph_info()
     if graph_info is None:
         raise HTTPException(status_code=400, detail="图数据库获取出错")
     return graph_info
 
 @data.post("/graph/index-nodes")
-async def index_nodes(data: dict = Body(default={}), current_user: User = Depends(get_admin_user)):
+async def index_nodes(data: dict = Body(default={}), current_user: User = Depends(get_superadmin_user)):
     if not graph_base.is_running():
         raise HTTPException(status_code=400, detail="图数据库未启动")
 
@@ -246,12 +246,12 @@ async def index_nodes(data: dict = Body(default={}), current_user: User = Depend
     return {"status": "success", "message": f"已成功为{count}个节点添加嵌入向量", "indexed_count": count}
 
 @data.get("/graph/node")
-async def get_graph_node(entity_name: str, current_user: User = Depends(get_admin_user)):
+async def get_graph_node(entity_name: str, current_user: User = Depends(get_superadmin_user)):
     result = graph_base.query_node(entity_name=entity_name)
     return {"result": graph_base.format_query_result_to_graph(result), "message": "success"}
 
 @data.get("/graph/nodes")
-async def get_graph_nodes(kgdb_name: str, num: int, current_user: User = Depends(get_admin_user)):
+async def get_graph_nodes(kgdb_name: str, num: int, current_user: User = Depends(get_superadmin_user)):
     if not config.enable_knowledge_graph:
         raise HTTPException(status_code=400, detail="Knowledge graph is not enabled")
 
@@ -260,7 +260,7 @@ async def get_graph_nodes(kgdb_name: str, num: int, current_user: User = Depends
     return {"result": graph_base.format_general_results(result), "message": "success"}
 
 @data.post("/graph/add-by-jsonl")
-async def add_graph_entity(file_path: str = Body(...), kgdb_name: str | None = Body(None), current_user: User = Depends(get_admin_user)):
+async def add_graph_entity(file_path: str = Body(...), kgdb_name: str | None = Body(None), current_user: User = Depends(get_superadmin_user)):
     if not config.enable_knowledge_graph:
         return {"message": "知识图谱未启用", "status": "failed"}
 
@@ -277,7 +277,7 @@ async def add_graph_entity(file_path: str = Body(...), kgdb_name: str | None = B
 class FileHandleRequest(BaseModel):
     file_path: str
 @data.post("/graph/handle")
-async def graphfile_handle(request: FileHandleRequest):
+async def graphfile_handle(request: FileHandleRequest, current_user: User = Depends(get_superadmin_user)):
     file_path = request.file_path
     '''首先进行文件处理'''
     EXTERNAL_API_URL = "http://host.docker.internal:8000/api/v1/tasks/submit"
@@ -351,7 +351,7 @@ async def graphfile_handle(request: FileHandleRequest):
 
 
 @data.post("/graph/build_graph")
-def api_build_graph():
+def api_build_graph(current_user: User = Depends(get_superadmin_user)):
     try:
         response = requests.post(
             "http://host.docker.internal:8111/build_graph",
@@ -373,7 +373,7 @@ def api_build_graph():
         return {"status": "failed", "detail": str(e)}
 
 @data.post("/graph/build_drillgraph")
-def api_build_drillgraph():
+def api_build_drillgraph(current_user: User = Depends(get_superadmin_user)):
     try:
         response = requests.post(
             "http://host.docker.internal:8111/build_drillgraph",
@@ -395,7 +395,7 @@ def api_build_drillgraph():
         return {"status": "failed", "detail": str(e)}
 
 @data.get("/graph/get_file_list/{graph_type}")
-def api_get_file_list(graph_type: str):
+def api_get_file_list(graph_type: str, current_user: User = Depends(get_superadmin_user)):
     try:
 
         response = requests.get(
@@ -414,7 +414,8 @@ def api_get_file_list(graph_type: str):
 @data.delete("/graph/delete_file/{graph_type}/{file_name}")
 def api_delete_graph_file(
     graph_type: str = fastapi.Path(..., description="图谱类型 drill/ground", regex="^(drill|ground)$"),
-    file_name: str = fastapi.Path(..., description="要删除的文件名")
+    file_name: str = fastapi.Path(..., description="要删除的文件名"),
+    current_user: User = Depends(get_superadmin_user),
 ):
     """
     删除指定图谱类型的文件（中间转发到内部服务）
@@ -449,7 +450,7 @@ def api_delete_graph_file(
         return {"status": "failed", "detail": str(e)}
 
 @data.get("/graph/get_downloadable_files/{graph_type}")
-def api_get_downloadable_files(graph_type: str):
+def api_get_downloadable_files(graph_type: str, current_user: User = Depends(get_superadmin_user)):
     try:
 
         response = requests.get(
@@ -466,7 +467,7 @@ def api_get_downloadable_files(graph_type: str):
         return {"status": "failed", "detail": str(e)}
 
 @data.get("/graph/download_file/{graph_type}/{file_name}")
-async def api_download_file(graph_type: str, file_name: str):
+async def api_download_file(graph_type: str, file_name: str, current_user: User = Depends(get_superadmin_user)):
     try:
         print(f"接收到下载请求 - graph_type: {graph_type}, filename: {file_name}")
 
@@ -575,7 +576,7 @@ async def api_download_file(graph_type: str, file_name: str):
 #         ) from e
 
 @data.post("/graph/run_graphrag")
-async def run_graphrag_index():
+async def run_graphrag_index(current_user: User = Depends(get_superadmin_user)):
     """
     触发 graphrag 索引构建
     """
@@ -596,7 +597,7 @@ async def update_database_info(
     db_id: str = Body(...),
     name: str = Body(...),
     description: str = Body(...),
-    current_user: User = Depends(get_admin_user)
+    current_user: User = Depends(get_superadmin_user)
 ):
     logger.debug(f"Update database {db_id} info: {name}, {description}")
     try:
