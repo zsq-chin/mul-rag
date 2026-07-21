@@ -2,14 +2,11 @@ from fastapi import HTTPException, status
 
 VALID_ROLES = frozenset({"superadmin", "admin", "user"})
 
-MANAGED_CHAT_KEYS = frozenset({
-    "use_multimodal_kb", "multimodal_kb_id", "multimodal_file_id",
-    "use_graph", "db_id", "selectedKB",
-})
+SUPERADMIN_CHAT_KEYS = frozenset({"use_graph"})
 
 def assert_chat_features_allowed(user, meta: dict | None) -> None:
     meta = meta or {}
-    requested = any(meta.get(key) not in (None, False, "") for key in MANAGED_CHAT_KEYS)
+    requested = any(meta.get(key) not in (None, False, "") for key in SUPERADMIN_CHAT_KEYS)
     if requested and user.role != "superadmin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前角色只能使用普通知识问答")
 

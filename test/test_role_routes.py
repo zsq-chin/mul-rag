@@ -100,7 +100,9 @@ class RoleRouteTests(unittest.TestCase):
         )
 
     def test_all_data_routes_require_superadmin(self):
-        self.assert_guards("data_router.py", "get_superadmin_user")
+        found = endpoints(parse_router("data_router.py"))
+        self.assertIn("get_required_user", dependency_names(found["get_databases"]))
+        self.assert_guards("data_router.py", "get_superadmin_user", {"get_databases"})
 
     def test_other_managed_routes_require_superadmin(self):
         for filename in (
@@ -111,8 +113,8 @@ class RoleRouteTests(unittest.TestCase):
 
     def test_chat_management_routes_require_superadmin(self):
         expected = {
-            "get_multimodal_kbs", "get_multimodal_image", "set_default_agent",
-            "get_chat_models", "update_chat_models", "get_tools", "save_agent_config",
+            "set_default_agent", "get_chat_models", "update_chat_models", "get_tools",
+            "save_agent_config",
         }
         found = endpoints(parse_router("chat_router.py"))
         self.assertEqual(expected - found.keys(), set())
@@ -120,6 +122,10 @@ class RoleRouteTests(unittest.TestCase):
             name for name in sorted(expected)
             if "get_superadmin_user" not in dependency_names(found[name])
         ], [])
+
+        for name in ("get_multimodal_kbs", "get_multimodal_image"):
+            with self.subTest(name=name):
+                self.assertIn("get_required_user", dependency_names(found[name]))
 
     def test_ordinary_chat_requires_login_and_rejects_forged_features(self):
         found = endpoints(parse_router("chat_router.py"))

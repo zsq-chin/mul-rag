@@ -1,6 +1,6 @@
 <script setup>
-import { ref, reactive, KeepAlive, onMounted } from 'vue'
-import { MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons-vue'
+import { ref, reactive, computed, KeepAlive, onMounted, onBeforeUnmount } from 'vue'
+import { MenuFoldOutlined, MenuUnfoldOutlined, TeamOutlined } from '@ant-design/icons-vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import {
   BugOutlined,
@@ -10,11 +10,15 @@ import { Bot, Flame ,Waypoints,TextSearch ,Speech ,Share2 ,Captions ,Milestone, 
 
 import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
+import { useUserStore } from '@/stores/user'
+import { navigationForRole } from '@/utils/access.mjs'
 import DebugComponent from '@/components/DebugComponent.vue'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
+import UserManagementComponent from '@/components/UserManagementComponent.vue'
 
 const configStore = useConfigStore()
 const databaseStore = useDatabaseStore()
+const userStore = useUserStore()
 
 const layoutSettings = reactive({
   showDebug: false,
@@ -34,55 +38,47 @@ const getRemoteDatabase = () => {
 }
 
 
-onMounted(() => {
-  getRemoteConfig()
-  getRemoteDatabase()
-})
-
 // 打印当前页面的路由信息，使用 vue3 的 setup composition API
 const route = useRoute()
-console.log("route", route)
 
-// 下面是导航菜单部分，添加智能体项
-const mainList = [{
-    name: '智能问答',
-    path: '/chat',
-    icon: MessageSquareMore,
-    activeIcon: MessageSquareMore,
-  },
-  {
-    name: '知识图谱',
-    path: '/graph',
-    icon: Share2,
-    activeIcon: Share2,
-    // hidden: !configStore.config.enable_knowledge_graph,
-  },
-  {
-    name: '知识库',
-    path: '/database',
-    icon: BookOpenCheck ,
-    activeIcon: BookOpenCheck ,
-    // hidden: !configStore.config.enable_knowledge_base,
-  },
-  {
-    name: '问答统计',           // 👈 新增
-    path: '/statistics',        // 👈 新增
-    icon: BarChart3,            // 👈 新增
-    activeIcon: BarChart3,      // 👈 新增
-  },
-  {
-    name: '多模态知识库',
-    path: '/multimodal-kb',
-    icon: Layers,
-    activeIcon: Layers,
-  },
-  {
-    name: '设置用户',
-    path: '/usermanagement',
-    activeIcon: BookOpenCheck ,
-    // hidden: !configStore.config.enable_knowledge_base,
+// 用户管理抽屉
+const userDrawerOpen = ref(false)
+const windowWidth = ref(typeof window === 'undefined' ? 1024 : window.innerWidth)
+const drawerWidth = computed(() => windowWidth.value < 768 ? '100%' : 760)
+
+const updateWindowWidth = () => {
+  windowWidth.value = window.innerWidth
+}
+
+onMounted(() => {
+  if (userStore.isSuperAdmin) {
+    getRemoteConfig()
+    getRemoteDatabase()
   }
-]
+  window.addEventListener('resize', updateWindowWidth)
+})
+
+onBeforeUnmount(() => window.removeEventListener('resize', updateWindowWidth))
+
+// 图标映射
+const ICON_MAP = {
+  chat: MessageSquareMore,
+  users: TeamOutlined,
+  graph: Share2,
+  database: BookOpenCheck,
+  statistics: BarChart3,
+  multimodal: Layers,
+}
+
+// 基于角色的导航列表
+const mainList = computed(() => {
+  const items = navigationForRole(userStore.userRole)
+  return items.map(item => ({
+    ...item,
+    icon: ICON_MAP[item.key] || MessageSquareMore,
+    activeIcon: ICON_MAP[item.key] || MessageSquareMore,
+  }))
+})
 </script>
 
 <template>
@@ -136,20 +132,32 @@ const mainList = [{
           </div>
           <div class="nav">
             <!-- 使用mainList渲染导航项 -->
-            <RouterLink
-              v-for="(item, index) in mainList"
-              :key="index"
-              :to="item.path"
-              v-show="!item.hidden"
-              class="nav-item"
-              active-class="active">
-              <component class="icon" :is="route.path.startsWith(item.path) ? item.activeIcon : item.icon" size="22"/>
-              <span class="text">{{item.name}}</span>
-            </RouterLink>
+            <template v-for="item in mainList" :key="item.key">
+              <!-- 有路径的导航项 -->
+              <RouterLink
+                v-if="item.path"
+                :to="item.path"
+                class="nav-item"
+                active-class="active">
+                <component class="icon" :is="route.path.startsWith(item.path) ? item.activeIcon : item.icon" size="22"/>
+                <span class="text">{{item.name}}</span>
+              </RouterLink>
+              <!-- 动作项（如用户管理抽屉） -->
+              <button
+                v-else
+                type="button"
+                class="nav-item"
+                @click="item.action === 'users' ? (userDrawerOpen = true) : null"
+                :aria-label="item.name"
+              >
+                <component class="icon" :is="item.icon" size="22"/>
+                <span class="text">{{item.name}}</span>
+              </button>
+            </template>
 
             <a-tooltip placement="right">
               <template #title>后端疑似没有正常启动或者正在繁忙中，请刷新一下或者检查 docker logs api-dev</template>
-              <div class="nav-item warning" v-if="!configStore.config._config_items">
+              <div class="nav-item warning" v-if="userStore.isSuperAdmin && !configStore.config._config_items">
                 <component class="icon" :is="ExclamationCircleOutlined" />
                 <span class="text">警告</span>
               </div>
@@ -183,9 +191,28 @@ const mainList = [{
         </div>
       </Transition>
       <div class="header-mobile">
-        <RouterLink to="/chat" class="nav-item" active-class="active">对话</RouterLink>
-        <RouterLink to="/database" class="nav-item" active-class="active">知识</RouterLink>
-        <RouterLink to="/setting" class="nav-item" active-class="active">设置</RouterLink>
+        <template v-for="item in mainList" :key="`mobile-${item.key}`">
+          <RouterLink
+            v-if="item.path"
+            :to="item.path"
+            class="nav-item"
+            active-class="active"
+          >
+            <component class="icon" :is="item.icon" size="20" />
+            <span class="text">{{ item.name }}</span>
+          </RouterLink>
+          <button
+            v-else
+            type="button"
+            class="nav-item"
+            :aria-label="item.name"
+            @click="item.action === 'users' ? (userDrawerOpen = true) : null"
+          >
+            <component class="icon" :is="item.icon" size="20" />
+            <span class="text">{{ item.name }}</span>
+          </button>
+        </template>
+        <UserInfoComponent class="mobile-user-info" />
       </div>
       <div
         id="app-router-view"
@@ -198,6 +225,18 @@ const mainList = [{
           <component :is="Component" v-else />
         </router-view>
       </div>
+
+      <!-- 用户管理抽屉 -->
+      <a-drawer
+        v-if="userStore.isAdmin"
+        v-model:open="userDrawerOpen"
+        title="用户管理"
+        placement="right"
+        :width="drawerWidth"
+        :destroy-on-close="false"
+      >
+        <UserManagementComponent :actor-role="userStore.userRole" />
+      </a-drawer>
     </div>
   </div>
 </template>
@@ -329,6 +368,7 @@ div.header, #app-router-view {
     margin: 0;
     text-decoration: none;
     cursor: pointer;
+    font-family: inherit;
 
     &.github {
       padding: 10px 12px;
@@ -415,6 +455,8 @@ div.header, #app-router-view {
 @media (max-width: 520px) {
   .app-layout {
     flex-direction: column-reverse;
+    min-width: 0;
+    overflow-x: hidden;
 
     div.header {
       display: none;
@@ -430,24 +472,44 @@ div.header, #app-router-view {
     flex-direction: row;
     width: 100%;
     padding: 0 20px;
-    justify-content: space-around;
+    justify-content: flex-start;
     align-items: center;
+    gap: 20px;
+    overflow-x: auto;
     flex: 0 0 60px;
     border-right: none;
     height: 40px;
 
     .nav-item {
+      display: inline-flex;
+      flex: 0 0 auto;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
       text-decoration: none;
-      width: 40px;
+      min-width: 48px;
+      padding: 4px;
+      border: 0;
+      background: transparent;
       color: var(--gray-900);
-      font-size: 1rem;
-      font-weight: bold;
+      font: inherit;
       transition: color 0.1s ease-in-out, font-size 0.1s ease-in-out;
 
       &.active {
         color: black;
         font-size: 1.1rem;
       }
+
+      .text {
+        margin-top: 2px;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+    }
+
+    .mobile-user-info {
+      flex: 0 0 48px;
+      min-width: 48px;
     }
   }
   .app-layout .chat-box::webkit-scrollbar {

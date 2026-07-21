@@ -7,6 +7,7 @@ export const useUserStore = defineStore('user', () => {
   const userId = ref(parseInt(localStorage.getItem('user_id') || '0') || null)
   const username = ref(localStorage.getItem('username') || '')
   const userRole = ref(localStorage.getItem('user_role') || '')
+  let hydrated = false
 
   // 计算属性
   const isLoggedIn = computed(() => !!token.value)
@@ -37,6 +38,7 @@ export const useUserStore = defineStore('user', () => {
       userId.value = data.user_id
       username.value = data.username
       userRole.value = data.role
+      hydrated = false
 
       // 保存到本地存储
       localStorage.setItem('user_token', data.access_token)
@@ -111,6 +113,7 @@ export const useUserStore = defineStore('user', () => {
     userId.value = null
     username.value = ''
     userRole.value = ''
+    hydrated = false
 
     // 清除本地存储
     localStorage.removeItem('user_token')
@@ -142,6 +145,7 @@ export const useUserStore = defineStore('user', () => {
       userId.value = data.user_id
       username.value = data.username
       userRole.value = data.role
+      hydrated = false
 
       // 保存到本地存储
       localStorage.setItem('user_token', data.access_token)
@@ -171,6 +175,34 @@ export const useUserStore = defineStore('user', () => {
   function getAuthHeaders() {
     return {
       'Authorization': `Bearer ${token.value}`
+    }
+  }
+
+  // 从服务器刷新当前用户角色，每次页面加载只调用一次
+  async function hydrate() {
+    if (hydrated || !token.value) return
+    hydrated = true
+    try {
+      const response = await fetch('/api/auth/me', {
+        headers: getAuthHeaders()
+      })
+      if (!response.ok) {
+        performLocalLogout()
+        return
+      }
+      const data = await response.json()
+      userRole.value = data.role
+      localStorage.setItem('user_role', data.role)
+      if (data.username) {
+        username.value = data.username
+        localStorage.setItem('username', data.username)
+      }
+      if (data.id) {
+        userId.value = data.id
+        localStorage.setItem('user_id', String(data.id))
+      }
+    } catch (error) {
+      console.error('hydrate 用户信息失败:', error)
     }
   }
 
@@ -283,6 +315,7 @@ export const useUserStore = defineStore('user', () => {
     getUsers,
     createUser,
     updateUser,
-    deleteUser
+    deleteUser,
+    hydrate
   }
 })

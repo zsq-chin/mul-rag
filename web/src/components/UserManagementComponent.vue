@@ -1,11 +1,16 @@
 <template>
   <div class="user-management">
-    <h3>用户管理</h3>
-    <p>用户管理，请谨慎操作，一旦删除用户，该用户将无法登录。</p>
-    <a-button type="primary" @click="showAddUserModal">
-      <template #icon><PlusOutlined /></template>
-      添加用户
-    </a-button>
+    <div class="user-toolbar">
+      <a-input-search
+        v-model:value="userSearch"
+        allow-clear
+        placeholder="搜索用户名、角色或 ID"
+      />
+      <a-button type="primary" @click="showAddUserModal">
+        <template #icon><PlusOutlined /></template>
+        添加用户
+      </a-button>
+    </div>
 
     <a-spin :spinning="userManagement.loading">
       <div v-if="userManagement.error" class="error-message">
@@ -13,10 +18,11 @@
       </div>
 
       <a-table
-        :dataSource="userManagement.users"
+        :dataSource="filteredUsers"
         :columns="userColumns"
         rowKey="id"
         :pagination="{ pageSize: 10 }"
+        :scroll="{ x: 780 }"
       >
         <!-- 角色列自定义渲染 -->
         <template #bodyCell="{ column, record }">
@@ -27,17 +33,22 @@
           <!-- 操作列 -->
           <template v-if="column.key === 'action'">
             <div class="table-actions">
-              <a-button type="link" @click="showEditUserModal(record)">
-                <EditOutlined />
-              </a-button>
-              <a-button
-                type="link"
-                danger
-                @click="confirmDeleteUser(record)"
-                :disabled="record.id === userStore.userId || (record.role === 'superadmin' && userStore.userRole !== 'superadmin')"
-              >
-                <DeleteOutlined />
-              </a-button>
+              <a-tooltip title="编辑用户">
+                <a-button type="link" aria-label="编辑用户" @click="showEditUserModal(record)">
+                  <EditOutlined />
+                </a-button>
+              </a-tooltip>
+              <a-tooltip title="删除用户">
+                <a-button
+                  type="link"
+                  danger
+                  aria-label="删除用户"
+                  @click="confirmDeleteUser(record)"
+                  :disabled="record.id === userStore.userId || (record.role === 'superadmin' && userStore.userRole !== 'superadmin')"
+                >
+                  <DeleteOutlined />
+                </a-button>
+              </a-tooltip>
             </div>
           </template>
         </template>
@@ -55,7 +66,7 @@
     >
       <a-form layout="vertical">
         <a-form-item label="用户名" required>
-          <a-input v-model:value="userManagement.form.username" placeholder="请输入用户名" />
+          <a-input v-model:value="userManagement.form.username" autocomplete="off" placeholder="请输入用户名" />
         </a-form-item>
         <template v-if="userManagement.editMode">
           <div class="password-toggle">
@@ -67,19 +78,19 @@
 
         <template v-if="!userManagement.editMode || userManagement.displayPasswordFields">
           <a-form-item label="密码" required>
-            <a-input-password v-model:value="userManagement.form.password" placeholder="请输入密码" />
+            <a-input-password v-model:value="userManagement.form.password" autocomplete="new-password" placeholder="请输入密码" />
           </a-form-item>
 
           <a-form-item label="确认密码" required>
-            <a-input-password v-model:value="userManagement.form.confirmPassword" placeholder="请再次输入密码" />
+            <a-input-password v-model:value="userManagement.form.confirmPassword" autocomplete="new-password" placeholder="请再次输入密码" />
           </a-form-item>
         </template>
 
-        <a-form-item label="角色">
+        <a-form-item label="角色" v-if="props.actorRole === 'superadmin'">
           <a-select v-model:value="userManagement.form.role">
             <a-select-option value="user">普通用户</a-select-option>
-            <a-select-option value="admin" v-if="userStore.isSuperAdmin">管理员</a-select-option>
-            <a-select-option value="superadmin" v-if="userStore.isSuperAdmin">超级管理员</a-select-option>
+            <a-select-option value="admin">管理员</a-select-option>
+            <a-select-option value="superadmin">超级管理员</a-select-option>
           </a-select>
         </a-form-item>
       </a-form>
@@ -88,18 +99,25 @@
 </template>
 
 <script setup>
-import { reactive, onMounted, watch } from 'vue';
+import { computed, reactive, ref, onMounted, watch } from 'vue';
 import { notification,Modal} from 'ant-design-vue';
 import { useUserStore } from '@/stores/user';
-import { useRouter } from 'vue-router';
+import { filterUsers } from '@/utils/access.mjs';
 import {
   DeleteOutlined,
   EditOutlined,
   PlusOutlined
 } from '@ant-design/icons-vue';
 
+const props = defineProps({
+  actorRole: {
+    type: String,
+    default: 'user'
+  }
+})
+
 const userStore = useUserStore();
-const router = useRouter();
+const userSearch = ref('');
 
 // 用户管理相关状态
 const userManagement = reactive({
@@ -118,6 +136,8 @@ const userManagement = reactive({
   },
   displayPasswordFields: true, // 编辑时是否显示密码字段
 });
+
+const filteredUsers = computed(() => filterUsers(userManagement.users, userSearch.value));
 // 监听密码字段显示状态变化
 watch(() => userManagement.displayPasswordFields, (newVal) => {
   // 当取消显示密码字段时，清空密码输入
@@ -168,7 +188,7 @@ const showEditUserModal = (user) => {
     confirmPassword: '',
     role: user.role
   };
-  userManagement.displayPasswordFields = true; // 默认显示密码字段
+  userManagement.displayPasswordFields = false;
   userManagement.modalVisible = true;
 };
 
@@ -196,11 +216,14 @@ const handleUserFormSubmit = async () => {
     userManagement.loading = true;
 
     // 根据模式决定创建还是更新用户
+    // admin 只能创建/编辑普通用户
+    const effectiveRole = props.actorRole === 'admin' ? 'user' : userManagement.form.role
+
     if (userManagement.editMode) {
       // 创建更新数据对象
       const updateData = {
         username: userManagement.form.username,
-        role: userManagement.form.role
+        role: effectiveRole
       };
 
       // 如果显示了密码字段并且填写了密码，才更新密码
@@ -214,7 +237,7 @@ const handleUserFormSubmit = async () => {
       await userStore.createUser({
         username: userManagement.form.username,
         password: userManagement.form.password,
-        role: userManagement.form.role
+        role: effectiveRole
       });
       notification.success({ message: '用户创建成功' });
     }
@@ -345,14 +368,11 @@ onMounted(() => {
 
 <style lang="less" scoped>
 .user-management {
-  margin-top: 20px;
-
-  h3 {
-    margin-bottom: 10px;
-  }
-
-  p {
-    margin-bottom: 20px;
+  .user-toolbar {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) auto;
+    gap: 12px;
+    margin-bottom: 16px;
   }
 
   .error-message {
@@ -368,6 +388,12 @@ onMounted(() => {
 
   .password-toggle {
     margin-bottom: 16px;
+  }
+}
+
+@media (max-width: 560px) {
+  .user-management .user-toolbar {
+    grid-template-columns: 1fr;
   }
 }
 </style>

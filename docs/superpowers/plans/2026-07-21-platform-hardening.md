@@ -12,11 +12,11 @@
 
 - Branch: `feature/platform-hardening`.
 - Roles are exact strings: `superadmin`, `admin`, `user`.
-- `superadmin` has all features; `admin` has knowledge QA plus ordinary-user management; `user` has knowledge QA only.
+- `superadmin` has all features; `admin` has knowledge QA, ordinary and multimodal retrieval, plus ordinary-user management; `user` has knowledge QA plus ordinary and multimodal retrieval.
 - API keys never appear in response payloads, browser persistence, URLs, logs, exception messages, or Git.
 - Chat requests identify a personal model only with `user_model_id`; the server verifies ownership and decrypts the key just in time.
-- Knowledge-base, multimodal, graph, database, statistics, and system-management APIs require `superadmin`.
-- Non-superadmins cannot select or forge multimodal/graph/knowledge-base options in chat.
+- Knowledge-base and multimodal retrieval APIs require any authenticated role; their management APIs plus graph, database, statistics, and system-management APIs require `superadmin`.
+- Non-superadmins can select ordinary and multimodal knowledge bases in chat, but cannot select or forge graph options.
 - Rich HTML is sanitized before rendering; only safe table markup and attributes are retained.
 - Graph jobs use `queued -> copying -> building -> converting -> importing -> indexing -> completed`, plus `failed`, `cancelling`, `cancelled`, and `interrupted`.
 - Production API runs without `--reload`; GraphRAG remains isolated from chat serving.
@@ -112,12 +112,13 @@ class AccessControlTests(unittest.TestCase):
     def user(self, role):
         return SimpleNamespace(id=1, role=role)
 
-    def test_only_superadmin_can_enable_managed_retrieval(self):
+    def test_all_roles_can_use_knowledge_retrieval_but_only_superadmin_can_use_graph(self):
+        for role in ("admin", "user", "superadmin"):
+            assert_chat_features_allowed(self.user(role), {"use_multimodal_kb": True, "db_id": "kb-1"})
         for role in ("admin", "user"):
             with self.assertRaises(HTTPException) as ctx:
-                assert_chat_features_allowed(self.user(role), {"use_multimodal_kb": True})
+                assert_chat_features_allowed(self.user(role), {"use_graph": True})
             self.assertEqual(ctx.exception.status_code, 403)
-        assert_chat_features_allowed(self.user("superadmin"), {"use_multimodal_kb": True})
 
     def test_admin_can_manage_only_ordinary_users(self):
         actor = self.user("admin")
@@ -143,14 +144,11 @@ Expected: `ModuleNotFoundError: No module named 'server.services.access_control'
 # server/services/access_control.py
 from fastapi import HTTPException, status
 
-MANAGED_CHAT_KEYS = frozenset({
-    "use_multimodal_kb", "multimodal_kb_id", "multimodal_file_id",
-    "use_graph", "db_id", "selectedKB",
-})
+SUPERADMIN_CHAT_KEYS = frozenset({"use_graph"})
 
 def assert_chat_features_allowed(user, meta: dict | None) -> None:
     meta = meta or {}
-    requested = any(meta.get(key) not in (None, False, "") for key in MANAGED_CHAT_KEYS)
+    requested = any(meta.get(key) not in (None, False, "") for key in SUPERADMIN_CHAT_KEYS)
     if requested and user.role != "superadmin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前角色只能使用普通知识问答")
 
@@ -195,7 +193,7 @@ git commit -m "fix(security): remove embedded secrets and define access policy"
 
 **Interfaces:**
 - Consumes: `assert_chat_features_allowed` and `can_manage_target` from Task 1.
-- Produces: all management routes guarded by `get_superadmin_user`; authenticated chat remains available to all roles.
+- Produces: all management routes guarded by `get_superadmin_user`; authenticated chat and knowledge-retrieval routes remain available to all roles.
 - Produces: admin user queries filtered to `User.role == "user"`.
 
 - [x] **Step 1: Add route-policy regression tests**
@@ -274,13 +272,21 @@ git commit -m "fix(auth): enforce server-side role matrix"
 - Modify: `web/src/router/index.js`
 - Modify: `web/src/layouts/AppLayout.vue`
 - Modify: `web/src/components/UserManagementComponent.vue`
+- Modify: `web/src/components/ChatComponent.vue`
+- Modify: `web/src/components/RefsSidebar.vue`
+- Create: `web/src/components/AuthenticatedImage.vue`
+- Create: `web/src/utils/authenticated-image.mjs`
+- Create: `web/tests/authenticated-image.test.mjs`
+- Modify: `server/services/access_control.py`
+- Modify: `server/routers/chat_router.py`
+- Modify: `server/routers/data_router.py`
 
 **Interfaces:**
 - Produces: `navigationForRole(role: string) -> NavigationItem[]` and `canAccessRoute(role, roles) -> boolean`.
 - Produces: `userStore.hydrate()` that refreshes role from `/api/auth/me` once per page load.
 - Produces: `AppLayout` drawer state that does not change `route.fullPath`.
 
-- [ ] **Step 1: Write failing navigation tests**
+- [x] **Step 1: Write failing navigation tests**
 
 ```javascript
 // web/tests/access.test.mjs
@@ -309,7 +315,7 @@ test('route roles are exact', () => {
 })
 ```
 
-- [ ] **Step 2: Add the Node test script and verify failure**
+- [x] **Step 2: Add the Node test script and verify failure**
 
 Add `"test": "node --test tests/*.test.mjs"` to `web/package.json`.
 
@@ -317,7 +323,7 @@ Run: `pnpm --dir web test`
 
 Expected: module-not-found failure for `src/utils/access.mjs`.
 
-- [ ] **Step 3: Implement pure access metadata and active route guard**
+- [x] **Step 3: Implement pure access metadata and active route guard**
 
 ```javascript
 // web/src/utils/access.mjs
@@ -336,7 +342,7 @@ export const canAccessRoute = (role, roles = []) => roles.length === 0 || roles.
 
 Remove `/usermanagement`. Set `/chat` roles to all three and all managed routes to `roles: ['superadmin']`. The guard calls `await userStore.hydrate()`, redirects unauthenticated users to `/login`, and redirects forbidden users to `/chat` with `message.warning('没有权限访问该功能')`.
 
-- [ ] **Step 4: Embed user management in an Ant drawer**
+- [x] **Step 4: Embed user management in an Ant drawer**
 
 In `AppLayout.vue`, compute navigation from `navigationForRole(userStore.userRole)`. Render route entries with `RouterLink`; render the `users` action as an icon button that sets `userDrawerOpen = true`. Add:
 
@@ -354,7 +360,7 @@ In `AppLayout.vue`, compute navigation from `navigationForRole(userStore.userRol
 
 Set `drawerWidth` to `computed(() => windowWidth.value < 768 ? '100%' : 760)`. Remove router imports and navigation calls from `UserManagementComponent.vue`; hide role editing when `actorRole === 'admin'`, and force create payload role to `user` for admins.
 
-- [ ] **Step 5: Verify tests and production build**
+- [x] **Step 5: Verify tests and production build**
 
 Run: `pnpm --dir web test`
 
@@ -364,7 +370,7 @@ Run: `pnpm --dir web build`
 
 Expected: Vite build exits 0 with no unresolved imports.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add web/package.json web/src/utils/access.mjs web/tests/access.test.mjs web/src/stores/user.js web/src/router/index.js web/src/layouts/AppLayout.vue web/src/components/UserManagementComponent.vue
@@ -609,7 +615,7 @@ const handleModelSelect = async selection => {
 }
 ```
 
-Delete stale model keys before `Object.assign`, or replace the metadata model fields explicitly so switching cannot retain both kinds. Hide knowledge-base, graph, and multimodal selectors unless `userStore.isSuperAdmin`.
+Delete stale model keys before `Object.assign`, or replace the metadata model fields explicitly so switching cannot retain both kinds. Show ordinary and multimodal knowledge-base selectors to every authenticated role; hide only the graph selector unless `userStore.isSuperAdmin`.
 
 - [ ] **Step 6: Verify tests, build, and browser storage**
 
@@ -872,7 +878,7 @@ Accept string/list/dict forms from `image_path`, `imagePath`, `img_name`, `image
 
 - [ ] **Step 4: Replace blocking proxies with streaming async HTTP**
 
-Add `httpx>=0.28.1`. Create one application-scoped client with limits and connect/read/write/pool timeouts. Build upstream requests with `client.build_request`, use `await client.send(request, stream=True)`, and return `StreamingResponse(response.aiter_bytes(64 * 1024), background=BackgroundTask(response.aclose))`. Forward only allowlisted cache/content headers. Add `get_superadmin_user` to KB list, chat image, and generic multimodal proxy routes.
+Add `httpx>=0.28.1`. Create one application-scoped client with limits and connect/read/write/pool timeouts. Build upstream requests with `client.build_request`, use `await client.send(request, stream=True)`, and return `StreamingResponse(response.aiter_bytes(64 * 1024), background=BackgroundTask(response.aclose))`. Forward only allowlisted cache/content headers. Use `get_required_user` on KB list and chat image retrieval routes, and `get_superadmin_user` on generic multimodal management proxy routes.
 
 - [ ] **Step 5: Stop loading the complete image catalog**
 
@@ -1350,7 +1356,7 @@ git commit -m "perf(server): bound blocking work and production concurrency"
 
 - [ ] **Step 1: Write the smoke script before running the stack**
 
-The script accepts `-BaseUrl`, three test credentials, and optional `-RemoteMultimodalBase`. It logs in each role, checks `/auth/me`, verifies the role route matrix, creates/deletes a temporary ordinary user as admin, verifies admin cannot create an admin, checks that a user cannot call graph/multimodal endpoints, and confirms a superadmin can. It prints status codes and exits nonzero on any mismatch; it never accepts or prints real model API keys.
+The script accepts `-BaseUrl`, three test credentials, and optional `-RemoteMultimodalBase`. It logs in each role, checks `/auth/me`, verifies the role route matrix, creates/deletes a temporary ordinary user as admin, verifies admin cannot create an admin, checks that a user can call ordinary and multimodal retrieval routes but cannot call graph or multimodal management routes, and confirms a superadmin can. It prints status codes and exits nonzero on any mismatch; it never accepts or prints real model API keys.
 
 - [ ] **Step 2: Run all automated tests and builds**
 

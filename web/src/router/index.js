@@ -1,6 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { message } from 'ant-design-vue'
 import AppLayout from '@/layouts/AppLayout.vue';
 import { useUserStore } from '@/stores/user';
+import { canAccessRoute, rolesForRoute, DEFAULT_ROUTE } from '@/utils/access.mjs';
 import MultimodalKbView from '@/views/MultimodalKbView.vue'
 
 const router = createRouter({
@@ -8,18 +10,12 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: '/liaohe'   // 👈 这里改成重定向登录页
+      redirect: DEFAULT_ROUTE
     },
     {
       path: '/login',
       name: 'login',
       component: () => import('../views/LoginView.vue'),
-      meta: { requiresAuth: false }
-    },
-    {
-      path: '/usermanagement',
-      name: 'usermanagement',
-      component: () => import('../components/UserManagementComponent.vue'),
       meta: { requiresAuth: false }
     },
     {
@@ -31,7 +27,7 @@ const router = createRouter({
           path: '',
           name: 'ChatComp',
           component: () => import('../views/ChatView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/chat') }
         }
       ]
     },
@@ -44,7 +40,7 @@ const router = createRouter({
           path: '',
           name: 'StatisticsComp',
           component: () => import('../views/AnswerStatistics.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/statistics') }
         }
       ]
     },
@@ -57,7 +53,7 @@ const router = createRouter({
           path: '',
           name: 'AgentComp',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/agent') }
         }
       ]
     },
@@ -65,7 +61,7 @@ const router = createRouter({
       path: '/agent/:agent_id',
       name: 'AgentSinglePage',
       component: () => import('../views/AgentSingleView.vue'),
-      meta: { requiresAuth: true }
+      meta: { requiresAuth: true, roles: rolesForRoute('/agent/:agent_id') }
     },
     {
       path: '/graph',
@@ -76,7 +72,7 @@ const router = createRouter({
           path: '',
           name: 'GraphComp',
           component: () => import('../views/GraphView.vue'),
-          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: false, requiresAuth: true, roles: rolesForRoute('/graph') }
         }
       ]
     },
@@ -89,13 +85,13 @@ const router = createRouter({
           path: '',
           name: 'DatabaseComp',
           component: () => import('../views/DataBaseView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/database') }
         },
         {
           path: ':database_id',
           name: 'DatabaseInfoComp',
           component: () => import('../views/DataBaseInfoView.vue'),
-          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: false, requiresAuth: true, roles: rolesForRoute('/database') }
         }
       ]
     },
@@ -109,7 +105,7 @@ const router = createRouter({
           name: 'GuideComp',
           // component: () => import('../views/EmptyView.vue'),
           component: () => import('../views/GuideView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/guide') }
         }
       ]
     },
@@ -122,7 +118,7 @@ const router = createRouter({
           path: '',
           name: 'WriterComp',
           component: () => import('../views/WriterView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/writer') }
         }
       ]
     },
@@ -135,7 +131,7 @@ const router = createRouter({
           path: '',
           name: 'MultimodalKb',
           component: MultimodalKbView,
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/multimodal-kb') }
         }
       ]
     },
@@ -148,7 +144,7 @@ const router = createRouter({
           path: '',
           name: 'TopicComp',
           component: () => import('../views/ItemView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/item') }
         }
       ]
     },
@@ -162,7 +158,7 @@ const router = createRouter({
           name: 'DataminingComp',
           // component: () => import('../views/CollegeView.vue'),
           component: () => import('../views/DataminingView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/datamining') }
         }
       ]
     },
@@ -175,7 +171,7 @@ const router = createRouter({
           path: '',
           name: 'SettingComp',
           component: () => import('../views/SettingView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/setting') }
         }
       ]
     },
@@ -188,7 +184,7 @@ const router = createRouter({
           path: '',
           name: 'TestComp',
           component: () => import('../views/GuideView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/test') }
         }
       ]
     },
@@ -201,7 +197,7 @@ const router = createRouter({
           path: '',
           name: 'SearchComp',
           component: () => import('../views/SearchView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/search') }
         }
       ]
     },
@@ -214,7 +210,7 @@ const router = createRouter({
           path: '',
           name: 'ShihuiComp',
           component: () => import('../views/ShiHuiView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/liaohe') }
         }
       ]
     },
@@ -222,7 +218,7 @@ const router = createRouter({
       path: '/exam/:id',
       name: 'exam',
       component: () => import('../views/ExamView.vue'),
-      meta: { requiresAuth: true }
+      meta: { requiresAuth: true, roles: rolesForRoute('/exam/:id') }
     },
     {
       path: '/:pathMatch(.*)*',
@@ -233,67 +229,43 @@ const router = createRouter({
   ]
 })
 
-// 全局前置守卫
+// 全局前置守卫 — 基于角色的访问控制
 router.beforeEach(async (to, from, next) => {
-  // // 检查路由是否需要认证
-  // const requiresAuth = to.matched.some(record => record.meta.requiresAuth === true);
-  // const requiresAdmin = to.matched.some(record => record.meta.requiresAdmin);
-  //
-  // const userStore = useUserStore();
-  // const isLoggedIn = userStore.isLoggedIn;
-  // const isAdmin = userStore.isAdmin;
-  //
-  // // 如果路由需要认证但用户未登录
-  // if (requiresAuth && !isLoggedIn) {
-  //   // 保存尝试访问的路径，登录后跳转
-  //   sessionStorage.setItem('redirect', to.fullPath);
-  //   next('/login');
-  //   return;
-  // }
-  //
-  // // 如果路由需要管理员权限但用户不是管理员
-  // if (requiresAdmin && !isAdmin) {
-  //   // 如果是普通用户，跳转到默认智能体页面
-  //   try {
-  //     // 先尝试获取默认智能体
-  //     const response = await fetch('/api/chat/default_agent');
-  //     if (response.ok) {
-  //       const data = await response.json();
-  //       if (data.default_agent_id) {
-  //         // 如果存在默认智能体，直接跳转
-  //         next(`/agent/${data.default_agent_id}`);
-  //         return;
-  //       }
-  //     }
-  //
-  //     // 如果没有默认智能体，则获取第一个可用智能体
-  //     const agentResponse = await fetch('/api/chat/agent');
-  //     if (agentResponse.ok) {
-  //       const agentData = await agentResponse.json();
-  //       if (agentData.agents && agentData.agents.length > 0) {
-  //         const firstAgentId = agentData.agents[0].name;
-  //         next(`/agent/${firstAgentId}`);
-  //       } else {
-  //         next('/');
-  //       }
-  //     } else {
-  //       next('/');
-  //     }
-  //   } catch (error) {
-  //     console.error('获取智能体信息失败:', error);
-  //     next('/');
-  //   }
-  //   return;
-  // }
-  //
-  // // 如果用户已登录但访问登录页
-  // if (to.path === '/login' && isLoggedIn) {
-  //   next('/');
-  //   return;
-  // }
+  const requiresAuth = to.matched.some(record => record.meta.requiresAuth === true)
+  const userStore = useUserStore()
 
-  // 其他情况正常导航
-  next();
-});
+  if (userStore.isLoggedIn) {
+    await userStore.hydrate()
+  }
+
+  const isLoggedIn = userStore.isLoggedIn
+
+  // 未登录用户只能访问公开页面
+  if (requiresAuth && !isLoggedIn) {
+    sessionStorage.setItem('redirect', to.fullPath)
+    next('/login')
+    return
+  }
+
+  // 已登录用户访问登录页时重定向到默认页面
+  if (to.path === '/login' && isLoggedIn) {
+    next(DEFAULT_ROUTE)
+    return
+  }
+
+  // 检查角色权限
+  const requiredRoles = to.matched.reduce((roles, record) => {
+    if (record.meta.roles) return record.meta.roles
+    return roles
+  }, null)
+
+  if (requiresAuth && requiredRoles && !canAccessRoute(userStore.userRole, requiredRoles)) {
+    message.warning('没有权限访问该功能')
+    next(DEFAULT_ROUTE)
+    return
+  }
+
+  next()
+})
 
 export default router

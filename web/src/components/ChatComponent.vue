@@ -73,7 +73,7 @@
         :message="message"
         :key="message.id"
         :is-processing="isStreaming"
-        :show-refs="['copy', 'regenerate', 'subGraph', 'webSearch', 'knowledgeBase', 'multimodalKnowledgeBase']"
+        :show-refs="messageRefActions"
         :is-latest-message="isLatestMessage(index)"
         @retry="retryMessage(message.id)"
         @retryStoppedMessage="retryStoppedMessage(message.id)"
@@ -103,14 +103,14 @@
             </div>
             <div
               :class="{'switch': true, 'opt-item': true, 'active': meta.use_graph}"
-              v-if="configStore.config.enable_knowledge_graph"
+              v-if="graphRetrievalEnabled && configStore.config.enable_knowledge_graph"
               @click="meta.use_graph=!meta.use_graph"
             >
               <Waypoints style="margin-right: 3px;" size="14"/>
               知识图谱
             </div>
             <a-dropdown
-              v-if="configStore.config.enable_knowledge_base && opts.databases.length > 0"
+              v-if="knowledgeRetrievalEnabled && opts.databases.length > 0"
               :class="{'opt-item': true, 'active': meta.selectedKB !== null}"
             >
               <a class="ant-dropdown-link" @click.prevent>
@@ -129,6 +129,7 @@
               </template>
             </a-dropdown>
             <a-dropdown
+              v-if="knowledgeRetrievalEnabled"
               :trigger="['hover']"
               :class="{'opt-item': true, 'active': meta.use_multimodal_kb}"
               overlayClassName="multimodal-kb-dropdown"
@@ -199,7 +200,7 @@ import MessageComponent from '@/components/MessageComponent.vue'
 import RefsSidebar from '@/components/RefsSidebar.vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import { chatApi } from '@/apis/auth_api'
-import { knowledgeBaseApi } from '@/apis/admin_api'
+import { canUseGraph, canUseKnowledgeRetrieval } from '@/utils/access.mjs'
 
 const props = defineProps({
   conv: Object,
@@ -255,6 +256,12 @@ const meta = reactive({
 const selectedMultimodalKb = computed(() =>
   opts.multimodalKbs.find(kb => kb.kbId === meta.multimodal_kb_id) || null
 )
+const graphRetrievalEnabled = computed(() => canUseGraph(userStore.userRole))
+const knowledgeRetrievalEnabled = computed(() => canUseKnowledgeRetrieval(userStore.userRole))
+const messageRefActions = computed(() => {
+  const actions = ['copy', 'regenerate', 'webSearch', 'knowledgeBase', 'multimodalKnowledgeBase']
+  return graphRetrievalEnabled.value ? [...actions, 'subGraph'] : actions
+})
 
 // 添加全局refs状态
 const refsSidebarVisible = ref(false)
@@ -325,7 +332,14 @@ const getHistory = () => {
 const useDatabase = (index) => {
   const selected = opts.databases[index]
   console.log(selected)
-  if (index != null && configStore.config.embed_model != selected.embed_model) {
+  const currentEmbedModel = configStore.config.embed_model
+  const selectedEmbedModel = selected?.embed_model
+  if (
+    index != null
+    && currentEmbedModel
+    && selectedEmbedModel
+    && currentEmbedModel !== selectedEmbedModel
+  ) {
     console.log(selected.embed_model, configStore.config.embed_model)
     message.error(`所选知识库的向量模型（${selected.embed_model}）与当前向量模型（${configStore.config.embed_model}) 不匹配，请重新选择`)
   } else {
@@ -552,17 +566,16 @@ const groupRefs = (id) => {
 }
 
 const loadDatabases = () => {
-  // 由于这是管理功能，需要检查用户是否有管理权限
-  if (!userStore.isAdmin) {
-    console.log('非管理员用户，跳过加载数据库列表');
+  if (!knowledgeRetrievalEnabled.value) {
     return;
   }
 
   try {
-    knowledgeBaseApi.getDatabases()
+    chatApi.getKnowledgeBases()
       .then(data => {
-        console.log(data)
-        opts.databases = data.databases
+        opts.databases = Array.isArray(data?.databases)
+          ? data.databases
+          : (Array.isArray(data) ? data : [])
       })
       .catch(error => {
         console.error('加载数据库列表失败:', error)

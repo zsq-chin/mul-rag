@@ -33,7 +33,7 @@ chat = APIRouter(prefix="/chat")
 
 
 @chat.get("/multimodal/kbs")
-async def get_multimodal_kbs(current_user: User = Depends(get_superadmin_user)):
+async def get_multimodal_kbs(current_user: User = Depends(get_required_user)):
     base_url = get_multimodal_api_base()
     timeout = float(os.getenv("MULTIMODAL_KB_TIMEOUT") or 30)
     try:
@@ -55,7 +55,7 @@ async def get_multimodal_image(
         kbId: str = Query(...),
         fileId: str = Query(...),
         imagePath: str = Query(...),
-        current_user: User = Depends(get_superadmin_user),
+        current_user: User = Depends(get_required_user),
         ):
     base_url = get_multimodal_api_base()
     try:

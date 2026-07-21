@@ -15,7 +15,7 @@
       </div>
       <a-tabs v-model:activeKey="activeTab" class="refs-tabs">
         <!-- 关系图 -->
-        <a-tab-pane key="graph" tab="关系图" :disabled="!hasGraphData">
+        <a-tab-pane v-if="graphRetrievalEnabled" key="graph" tab="关系图" :disabled="!hasGraphData">
           <div v-if="hasGraphData" class="graph-container">
             <GraphContainer :graphData="latestRefs.graph_base.results" ref="graphContainerRef" />
           </div>
@@ -50,7 +50,7 @@
         </a-tab-pane>
 
         <!-- 知识库 -->
-        <a-tab-pane key="knowledgeBase" tab="知识库" :disabled="!hasKnowledgeBaseData">
+        <a-tab-pane v-if="knowledgeRetrievalEnabled" key="knowledgeBase" tab="知识库" :disabled="!hasKnowledgeBaseData">
           <div v-if="hasKnowledgeBaseData">
             <div class="file-list">
               <a-collapse v-model:activeKey="activeFiles">
@@ -90,7 +90,7 @@
           </div>
         </a-tab-pane>
 
-        <a-tab-pane key="multimodalKnowledgeBase" tab="多模态知识库" :disabled="!hasMultimodalKnowledgeBaseData">
+        <a-tab-pane v-if="knowledgeRetrievalEnabled" key="multimodalKnowledgeBase" tab="多模态知识库" :disabled="!hasMultimodalKnowledgeBaseData">
           <div v-if="hasMultimodalKnowledgeBaseData">
             <div class="multimodal-kb-summary">
               <div>
@@ -129,17 +129,13 @@
                       </div>
                       <div class="result-text">{{ res.text }}</div>
                       <div v-if="res.images && res.images.length" class="multimodal-images">
-                        <a
+                        <AuthenticatedImage
                           v-for="image in res.images"
                           :key="image.url"
-                          :href="image.url"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          class="multimodal-image-link"
-                        >
-                          <img :src="image.url" :alt="image.alt || image.name" loading="lazy" />
-                          <span>{{ image.alt || image.name }}</span>
-                        </a>
+                          :src="image.url"
+                          :alt="image.alt || image.name"
+                          :label="image.alt || image.name"
+                        />
                       </div>
                     </div>
                   </div>
@@ -168,6 +164,9 @@ import {
   PushpinOutlined
 } from '@ant-design/icons-vue'
 import GraphContainer from './GraphContainer.vue'
+import AuthenticatedImage from './AuthenticatedImage.vue'
+import { useUserStore } from '@/stores/user'
+import { canUseGraph, canUseKnowledgeRetrieval } from '@/utils/access.mjs'
 
 const props = defineProps({
   visible: {
@@ -181,8 +180,11 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:visible', 'pin-change'])
+const userStore = useUserStore()
+const graphRetrievalEnabled = computed(() => canUseGraph(userStore.userRole))
+const knowledgeRetrievalEnabled = computed(() => canUseKnowledgeRetrieval(userStore.userRole))
 // 标签页相关
-const activeTab = ref('graph')
+const activeTab = ref(graphRetrievalEnabled.value ? 'graph' : 'webSearch')
 const activeFiles = ref([])
 const activeMultimodalFiles = ref([])
 
@@ -312,28 +314,28 @@ watch(() => props.visible, (newValue) => {
     console.log('Checking which tabs are available');
     // 只有在activeTab无效的情况下才自动选择标签页
     const currentTabValid =
-      (activeTab.value === 'graph' && hasGraphData.value) ||
+      (graphRetrievalEnabled.value && activeTab.value === 'graph' && hasGraphData.value) ||
       (activeTab.value === 'webSearch' && hasWebSearchData.value) ||
-      (activeTab.value === 'knowledgeBase' && hasKnowledgeBaseData.value) ||
-      (activeTab.value === 'multimodalKnowledgeBase' && hasMultimodalKnowledgeBaseData.value);
+      (knowledgeRetrievalEnabled.value && activeTab.value === 'knowledgeBase' && hasKnowledgeBaseData.value) ||
+      (knowledgeRetrievalEnabled.value && activeTab.value === 'multimodalKnowledgeBase' && hasMultimodalKnowledgeBaseData.value);
 
     if (!currentTabValid) {
       console.log('Current tab is invalid, finding first available tab');
       // 当前标签无效，需要寻找一个有效的标签
-      if (hasGraphData.value) {
+      if (graphRetrievalEnabled.value && hasGraphData.value) {
         console.log('Selected graph tab');
         activeTab.value = 'graph';
       } else if (hasWebSearchData.value) {
         console.log('Selected webSearch tab');
         activeTab.value = 'webSearch';
-      } else if (hasKnowledgeBaseData.value) {
+      } else if (knowledgeRetrievalEnabled.value && hasKnowledgeBaseData.value) {
         console.log('Selected knowledgeBase tab');
         activeTab.value = 'knowledgeBase';
         // 打开第一个文件
         if (Object.keys(groupedKnowledgeResults.value).length > 0) {
           activeFiles.value = [Object.keys(groupedKnowledgeResults.value)[0]];
         }
-      } else if (hasMultimodalKnowledgeBaseData.value) {
+      } else if (knowledgeRetrievalEnabled.value && hasMultimodalKnowledgeBaseData.value) {
         console.log('Selected multimodalKnowledgeBase tab');
         activeTab.value = 'multimodalKnowledgeBase';
         if (Object.keys(groupedMultimodalResults.value).length > 0) {
@@ -376,6 +378,11 @@ const setActiveTab = (tab) => {
   console.log('Full latestRefs structure:', JSON.stringify(props.latestRefs));
 
   // 如果要设置的标签是有效的，直接设置
+  if (!graphRetrievalEnabled.value && tab === 'graph') {
+    activeTab.value = 'webSearch'
+    return
+  }
+
   if ((tab === 'graph' && hasGraphData.value) ||
       (tab === 'webSearch' && hasWebSearchData.value) ||
       (tab === 'knowledgeBase' && hasKnowledgeBaseData.value) ||

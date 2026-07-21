@@ -69,6 +69,8 @@ export const chatApi = {
 
   getMultimodalKbs: () => apiGet('/api/chat/multimodal/kbs', {}, true),
 
+  getKnowledgeBases: () => apiGet('/api/data/', {}, true),
+
   /**
    * 获取默认智能体
    * @returns {Promise} - 默认智能体信息

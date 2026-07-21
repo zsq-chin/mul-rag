@@ -21,12 +21,21 @@ class AccessControlTests(unittest.TestCase):
     def user(self, role):
         return SimpleNamespace(id=1, role=role)
 
-    def test_only_superadmin_can_enable_managed_retrieval(self):
+    def test_every_authenticated_role_can_use_knowledge_retrieval(self):
+        for role in ("user", "admin", "superadmin"):
+            assert_chat_features_allowed(self.user(role), {
+                "use_multimodal_kb": True,
+                "multimodal_kb_id": "drilling-design",
+                "db_id": "ordinary-kb",
+                "selectedKB": 0,
+            })
+
+    def test_only_superadmin_can_enable_graph_retrieval(self):
         for role in ("admin", "user"):
             with self.assertRaises(HTTPException) as ctx:
-                assert_chat_features_allowed(self.user(role), {"use_multimodal_kb": True})
+                assert_chat_features_allowed(self.user(role), {"use_graph": True})
             self.assertEqual(ctx.exception.status_code, 403)
-        assert_chat_features_allowed(self.user("superadmin"), {"use_multimodal_kb": True})
+        assert_chat_features_allowed(self.user("superadmin"), {"use_graph": True})
 
     def test_admin_can_manage_only_ordinary_users(self):
         actor = self.user("admin")

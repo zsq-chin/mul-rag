@@ -154,8 +154,8 @@ import { ref, reactive, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useUserStore } from '@/stores/user';
 import { message } from 'ant-design-vue';
-import { chatApi } from '@/apis/auth_api';
 import { authApi, healthApi } from '@/apis/public_api';
+import { DEFAULT_ROUTE } from '@/utils/access.mjs';
 import { UserOutlined, LockOutlined, WechatOutlined, QrcodeOutlined, ThunderboltOutlined, ExclamationCircleOutlined } from '@ant-design/icons-vue';
 import loginBg from '@/assets/pics/login_bg.jpg';
 
@@ -226,46 +226,15 @@ const handleLogin = async () => {
 
 // 处理CAS登录
 
-// 登录后重定向
+// 登录后重定向：保留先前请求的非根路径，否则默认 /chat
 const redirectAfterLogin = async () => {
-  // 获取重定向路径
-  const redirectPath = sessionStorage.getItem('redirect') || '/';
-  sessionStorage.removeItem('redirect'); // 清除重定向信息
+  const redirectPath = sessionStorage.getItem('redirect');
+  sessionStorage.removeItem('redirect');
 
-  // 根据用户角色决定重定向目标
-  if (redirectPath === '/') {
-    // 如果是管理员，直接跳转到/chat页面
-    if (userStore.isAdmin) {
-      router.push('/chat');
-      return;
-    }
-
-    // 普通用户跳转到默认智能体
-    try {
-      // 尝试获取默认智能体
-      const data = await chatApi.getDefaultAgent();
-      if (data.default_agent_id) {
-        // 如果存在默认智能体，直接跳转
-        router.push(`/agent/${data.default_agent_id}`);
-        return;
-      }
-
-      // 没有默认智能体，获取第一个可用智能体
-      const agentData = await chatApi.getAgents();
-      if (agentData.agents && agentData.agents.length > 0) {
-        router.push(`/agent/${agentData.agents[0].name}`);
-        return;
-      }
-
-      // 没有可用智能体，回退到首页
-      router.push('/');
-    } catch (error) {
-      console.error('获取智能体信息失败:', error);
-      router.push('/');
-    }
-  } else {
-    // 跳转到其他预设的路径
+  if (redirectPath && redirectPath !== '/') {
     router.push(redirectPath);
+  } else {
+    router.push(DEFAULT_ROUTE);
   }
 };
 
@@ -286,7 +255,7 @@ const handleInitialize = async () => {
     });
 
     message.success('管理员账户创建成功');
-    router.push('/');
+    router.push(DEFAULT_ROUTE);
   } catch (error) {
     console.error('初始化失败:', error);
     errorMessage.value = error.message || '初始化失败，请重试';
@@ -409,9 +378,9 @@ const handleCasRedirect = async () => {
 
 // 组件挂载时
 onMounted(async () => {
-  // 如果已登录，跳转到首页
+  // 如果已登录，跳转到对话页
   if (userStore.isLoggedIn) {
-    router.push('/');
+    router.push(DEFAULT_ROUTE);
     return;
   }
 

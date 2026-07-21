@@ -16,7 +16,7 @@ from starlette.responses import StreamingResponse
 
 from src.utils import logger, hashstr
 from src import executor, retriever, config, knowledge_base, graph_base
-from server.utils.auth_middleware import get_superadmin_user
+from server.utils.auth_middleware import get_required_user, get_superadmin_user
 from server.models.user_model import User
 from typing import List, Optional
 from fastapi.responses import JSONResponse
@@ -31,7 +31,7 @@ UPLOAD_DIR = Path("D:\shanhai\sage-master\sage-master\saves\data\graphragfile")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 @data.get("/")
-async def get_databases(current_user: User = Depends(get_superadmin_user)):
+async def get_databases(current_user: User = Depends(get_required_user)):
     try:
         database = knowledge_base.get_databases()
     except Exception as e:
