@@ -133,6 +133,21 @@ class RoleRouteTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn("get_required_user", dependency_names(found[name]))
                 self.assertIn("assert_chat_features_allowed", call_names(found[name]))
+        for name in ("chat_post", "call"):
+            with self.subTest(model_resolution=name):
+                self.assertIn("resolve_model_for_user", call_names(found[name]))
+
+    def test_personal_model_routes_require_login(self):
+        found = endpoints(parse_router("user_model_router.py"))
+        expected = {
+            "get_user_models", "add_user_model", "edit_user_model",
+            "remove_user_model", "mark_user_model_selected", "validate_user_model",
+        }
+        self.assertEqual(expected - found.keys(), set())
+        self.assertEqual([
+            name for name in sorted(expected)
+            if "get_required_user" not in dependency_names(found[name])
+        ], [])
 
     def test_auth_routes_use_role_specific_guards(self):
         expected = {

@@ -22,6 +22,13 @@ class User(Base):
     # 关联CAS Session
     cas_sessions = relationship("CASSession", back_populates="user", passive_deletes=True)
 
+    model_credentials = relationship(
+        "UserModelCredential",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
     def to_dict(self, include_password=False):
         result = {
             "id": self.id,
@@ -82,3 +89,5 @@ User.exam_papers_records = relationship("ExamPapersRecord", back_populates="user
 # 在文件底部导入 CASSession 并添加关系
 from server.models.cas_session_model import CASSession
 User.cas_sessions = relationship("CASSession", back_populates="user", passive_deletes=True)
+
+from server.models.user_model_credential import UserModelCredential

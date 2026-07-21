@@ -398,7 +398,7 @@ git commit -m "feat(users): add role-aware in-page user management"
 - Produces: `/api/chat/user-models` CRUD and `/api/chat/user-models/{id}/select`.
 - Consumes: `select_model(..., custom_model_info=...)` from `src.models`.
 
-- [ ] **Step 1: Write failing encryption, ownership, and URL tests**
+- [x] **Step 1: Write failing encryption, ownership, and URL tests**
 
 ```python
 # test/test_user_model_credentials.py
@@ -429,13 +429,13 @@ class CredentialTests(unittest.TestCase):
                 validate_api_base("https://localhost/v1")
 ```
 
-- [ ] **Step 2: Run the credential test and verify failure**
+- [x] **Step 2: Run the credential test and verify failure**
 
 Run: `python -m unittest test.test_user_model_credentials -v`
 
 Expected: module-not-found failure for `server.services.model_credentials`.
 
-- [ ] **Step 3: Add the credential table and cipher**
+- [x] **Step 3: Add the credential table and cipher**
 
 ```python
 # server/models/user_model_credential.py
@@ -465,7 +465,7 @@ class UserModelCredential(Base):
 
 `CredentialCipher` loads a supplied key or `MODEL_CREDENTIAL_MASTER_KEY`, rejects a missing/invalid key with a non-secret message, and wraps `cryptography.fernet.Fernet`. Add `cryptography>=44.0.0` as a direct dependency. Import the model before `Base.metadata.create_all` and add `User.model_credentials` with cascade delete.
 
-- [ ] **Step 4: Implement URL validation and owned CRUD service**
+- [x] **Step 4: Implement URL validation and owned CRUD service**
 
 ```python
 def validate_api_base(value: str) -> str:
@@ -484,7 +484,7 @@ def validate_api_base(value: str) -> str:
 
 Service queries always include both `UserModelCredential.id == model_id` and `UserModelCredential.user_id == user.id`. It returns dictionaries with `id`, `display_name`, `provider`, `model_name`, `api_base`, `key_hint`, `has_api_key`, `last_used_at`, `created_at`, and `updated_at`; it never returns `encrypted_api_key`.
 
-- [ ] **Step 5: Add typed routes and runtime resolution**
+- [x] **Step 5: Add typed routes and runtime resolution**
 
 Use Pydantic request models with `api_key: SecretStr` on create and `api_key: SecretStr | None` on update. Implement:
 
@@ -514,7 +514,7 @@ def select_model(model_provider=None, model_name=None, custom_model_info=None):
 
 In `chat_router.py`, normalize `meta = meta or {}`, add `db: Session = Depends(get_db)`, call `assert_chat_features_allowed`, then `model = resolve_model_for_user(db, current_user, meta)`. The resolver accepts `meta["user_model_id"]` only after ownership lookup; otherwise it uses the requested built-in provider/name or server default.
 
-- [ ] **Step 6: Verify credential and chat-model tests**
+- [x] **Step 6: Verify credential and chat-model tests**
 
 Run: `python -m unittest test.test_user_model_credentials -v`
 
@@ -524,7 +524,7 @@ Run: `python -m unittest discover -s test -v`
 
 Expected: full backend suite passes.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add pyproject.toml uv.lock server/models server/services/model_credentials.py server/routers/user_model_router.py server/routers/chat_router.py server/routers/__init__.py test/test_user_model_credentials.py src/models/__init__.py src/models/chat_model.py

@@ -10,6 +10,7 @@ from server.models.user_model import User
 from server.models.thread_model import Thread
 from server.models.kb_models import KnowledgeDatabase, KnowledgeFile, KnowledgeNode
 from server.models.statistics_model import Question, Discussion, HelpRequest
+from server.models.user_model_credential import UserModelCredential
 from src.utils import logger
 
 class DBManager:

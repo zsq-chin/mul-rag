@@ -20,6 +20,7 @@ from src.utils.logging_config import logger
 from src.agents.tools_factory import get_all_tools
 from server.utils.auth_middleware import get_superadmin_user
 from server.services.access_control import assert_chat_features_allowed
+from server.services.model_credentials import resolve_model_for_user
 from fastapi import BackgroundTasks # [新增]
 from server.db_manager import db_manager # [新增] 用于在后台任务中获取独立session
 from server.models.statistics_model import Question
@@ -232,6 +233,7 @@ async def chat_post(
         meta: dict = Body(None),
         history: list[dict] | None = Body(None),
         thread_id: str | None = Body(None),
+        db: Session = Depends(get_db),
         current_user: User = Depends(get_required_user),
         background_tasks: BackgroundTasks = BackgroundTasks() # [新增] 注入后台任务
         ):
@@ -244,7 +246,7 @@ async def chat_post(
     # 注意：这里不需要传入 db，因为后台任务会自己创建新的 session
     background_tasks.add_task(process_question_stats, query)
 
-    model = select_model()
+    model = resolve_model_for_user(db, current_user, meta)
     meta["server_model_name"] = model.model_name
     history_manager = HistoryManager(history, system_prompt=meta.get("system_prompt"))
     logger.debug(f"Received query: {query} with meta: {meta}")
@@ -362,11 +364,16 @@ async def chat_post(
 
     return StreamingResponse(generate_response(), media_type='application/json')
 @chat.post("/call")
-async def call(query: str = Body(...), meta: dict = Body(None), current_user: User = Depends(get_required_user)):
+async def call(
+        query: str = Body(...),
+        meta: dict = Body(None),
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_required_user),
+        ):
     """调用模型进行简单问答（需要登录）"""
     meta = meta or {}
     assert_chat_features_allowed(current_user, meta)
-    model = select_model(model_provider=meta.get("model_provider"), model_name=meta.get("model_name"))
+    model = resolve_model_for_user(db, current_user, meta)
     async def predict_async(query):
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(executor, model.predict, query)
