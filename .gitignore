@@ -44,7 +44,7 @@ docker/volumes
 docker/volume
 .cursorrules
 
-models/
+/models/
 olmocr/
 mul_rag/backend/data/
 indexing/output/

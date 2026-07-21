@@ -95,7 +95,7 @@
 - Produces: `WebSearcher` that reads only `BOCHA_API_KEY`.
 - Produces: model errors containing URL/model name but no key characters.
 
-- [ ] **Step 1: Write failing policy and redaction tests**
+- [x] **Step 1: Write failing policy and redaction tests**
 
 ```python
 # test/test_access_control.py
@@ -131,13 +131,13 @@ class AccessControlTests(unittest.TestCase):
                 WebSearcher()
 ```
 
-- [ ] **Step 2: Run the test and verify the missing policy module fails**
+- [x] **Step 2: Run the test and verify the missing policy module fails**
 
 Run: `python -m unittest test.test_access_control -v`
 
 Expected: `ModuleNotFoundError: No module named 'server.services.access_control'`.
 
-- [ ] **Step 3: Implement exact role policy and secret lookup**
+- [x] **Step 3: Implement exact role policy and secret lookup**
 
 ```python
 # server/services/access_control.py
@@ -164,7 +164,7 @@ In `src/utils/web_search_bocha.py`, set `api_key = os.getenv("BOCHA_API_KEY")` a
 
 Change `.gitignore` from `models/` to `/models/`. This keeps the root model-weight directory ignored while allowing the Python source packages `server/models` and `src/models` to be tracked. Add those Python source files to this commit; do not add root model weights.
 
-- [ ] **Step 4: Verify policy tests and scan tracked source for key-shaped literals**
+- [x] **Step 4: Verify policy tests and scan tracked source for key-shaped literals**
 
 Run: `python -m unittest test.test_access_control -v`
 
@@ -174,7 +174,7 @@ Run: `git grep -n -E 'sk-[A-Za-z0-9]{16,}|API Key:.*\*\*\*' -- ':!docs/superpowe
 
 Expected: no output. Revoke and rotate the previously committed provider key outside Git before enabling web search.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add .gitignore server/services/__init__.py server/services/access_control.py test/__init__.py test/test_access_control.py src/utils/web_search_bocha.py server/models/*.py src/models/*.py

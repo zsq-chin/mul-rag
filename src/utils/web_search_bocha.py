@@ -4,7 +4,7 @@ import json
 
 class WebSearcher:
     def __init__(self):
-        api_key = "sk-e83c48dc4f864d9690b90664f43a0158"
+        api_key = os.getenv("BOCHA_API_KEY")
         if not api_key:
             raise ValueError("BOCHA_API_KEY environment variable is not set")
         self.url = "https://api.bochaai.com/v1/web-search"
@@ -57,5 +57,5 @@ class WebSearcher:
             return formatted_results
 
         except Exception as e:
-            print(f"搜索出错: {e}")
+            print(f"搜索出错: {type(e).__name__}")
             return []
