@@ -276,13 +276,22 @@ services:
     container_name: graphrag-worker
     working_dir: /app
     volumes:
-      - ./indexing:/app/indexing:rw  # 绑定索引数据目录
-      - ./indexing_drill:/app/indexing_drill:rw  # 绑定索引数据目录
+      - ./indexing:/app/indexing:rw
+      - ./indexing_drill:/app/indexing_drill:rw
       - ./saves/data/graphragfile:/app/saves/data/graphragfile:rw
       - ./saves/data/copypath:/app/saves/data/copypath:rw
       - ./graphrag_api:/app/graphrag_api:rw
-    ports:
-      - "8111:8111"   # 暴露 FastAPI
+      - ./saves/data/graphrag-jobs:/app/jobs:rw
+    expose:
+      - "8111"
+    environment:
+      - GRAPH_JOB_DB=/app/jobs/jobs.db
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8111/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks:
       - app-network
     restart: unless-stopped

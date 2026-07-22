@@ -1,12 +1,15 @@
 """Graph job data schemas.
 
-Public dataclasses only — no database imports, no side-effects on import.
+Public dataclasses and Pydantic models -- no database imports,
+no side-effects on import.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import List
+from dataclasses import dataclass
+from typing import List, Literal
+
+from pydantic import BaseModel, ConfigDict
 
 
 VALID_GRAPH_TYPES: List[str] = ["ground", "drill"]
@@ -53,6 +56,43 @@ TERMINAL_STATUSES: set[str] = {"completed", "failed", "cancelled", "interrupted"
 @dataclass
 class JobRecord:
     """Immutable snapshot of a graph job row."""
+
+    id: str
+    graph_type: str
+    status: str
+    stage: str
+    progress: int
+    created_at: str
+    started_at: str | None
+    finished_at: str | None
+    cancel_requested: bool
+    input_count: int
+    relationship_count: int
+    artifact_path: str
+    artifact_sha256: str
+    error_summary: str
+    log_tail: str
+
+
+# ---------------------------------------------------------------------------
+# Pydantic v2 API schemas
+# ---------------------------------------------------------------------------
+
+
+class JobCreate(BaseModel):
+    """Request body for POST /jobs."""
+
+    graph_type: Literal["ground", "drill"]
+
+
+class JobResponse(BaseModel):
+    """Response body mirroring every column in the jobs table.
+
+    Field names and types match :class:`JobRecord` exactly.
+    ``from_attributes=True`` allows constructing from dataclass instances.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: str
     graph_type: str

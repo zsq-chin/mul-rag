@@ -1,17 +1,24 @@
-# docker/graphrag.Dockerfile
+# docker/graphrag.Dockerfile -- GraphRAG worker image (Task 9B-2B)
+# Pinned dependency versions for reproducible builds.
+
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# 安装依赖
-RUN pip install --no-cache-dir graphrag==0.1.1 fastapi uvicorn
+# Install pinned dependencies in a single layer.
+RUN pip install --no-cache-dir \
+      graphrag==0.1.1 \
+      fastapi==0.116.1 \
+      uvicorn==0.35.0 \
+      pandas==2.2.3 \
+      pyarrow==15.0.0 \
+      httpx==0.28.1
 
-# 拷贝 API 代码到容器
+# Copy API code into the image.
 COPY graphrag_api/ /app/graphrag_api
 
-# 设置工作目录和命令为启动 FastAPI
-WORKDIR /app
+# Expose the FastAPI port (informational).
+EXPOSE 8111
 
-# 默认启动 FastAPI
+# Start the FastAPI server.
 CMD ["uvicorn", "graphrag_api.main:app", "--host", "0.0.0.0", "--port", "8111"]
-
