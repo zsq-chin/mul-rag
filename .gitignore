@@ -69,7 +69,6 @@ saves_dev/
 *.npz
 *.faiss
 *.index
-graphrag_api/
 tianshu/
 mineru-tianshu/
 *.zip
