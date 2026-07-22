@@ -38,6 +38,7 @@ services:
       - ./tianshu/data/output:/app/output:rw
       - ./saves/data/copypath:/app/saves/data/copypath:rw
       - ./indexing:/app/indexing:rw
+      - ./indexing_drill:/app/indexing_drill:rw
       - ${MODEL_DIR:-./models}:/models  # 使用默认值处理未定义的环境变量
     deploy:
       resources:
@@ -70,6 +71,9 @@ services:
       - MODEL_CREDENTIAL_MASTER_KEY=${MODEL_CREDENTIAL_MASTER_KEY:-}
       - USER_MODEL_ALLOWED_HOSTS=${USER_MODEL_ALLOWED_HOSTS:-}
       - USER_MODEL_ALLOW_HTTP=${USER_MODEL_ALLOW_HTTP:-false}
+      - GRAPH_INTERNAL_TOKEN=${GRAPH_INTERNAL_TOKEN:-}
+      - GRAPH_GROUND_IMPORT_ROOT=/app/indexing/ground_graph_fill
+      - GRAPH_DRILL_IMPORT_ROOT=/app/indexing_drill/drill_graph_fill
     depends_on:
       mysql:
         condition: service_healthy
@@ -286,6 +290,9 @@ services:
       - "8111"
     environment:
       - GRAPH_JOB_DB=/app/jobs/jobs.db
+      - GRAPH_INTERNAL_TOKEN=${GRAPH_INTERNAL_TOKEN:-}
+      - MAIN_API_INTERNAL_URL=http://api:5050/api/data/graph/internal/import
+      - GRAPH_IMPORT_TIMEOUT=${GRAPH_IMPORT_TIMEOUT:-1800}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8111/health')"]
       interval: 10s

@@ -98,6 +98,110 @@ class GraphWorkerComposeTests(unittest.TestCase):
         self.assertEqual(self.svc.get("restart"), "unless-stopped")
 
 
+class GraphApiComposeTests(unittest.TestCase):
+    """Assert api service carries the graph-import wiring in docker-compose.yml."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.compose = _load_compose()
+        cls.svc = cls.compose["services"]["api"]
+
+    # -- volumes ---------------------------------------------------------------
+
+    def test_api_indexing_drill_volume_present(self) -> None:
+        volumes: list[str] = self.svc.get("volumes", [])
+        self.assertIn(
+            "./indexing_drill:/app/indexing_drill:rw",
+            volumes,
+            "api service is missing the indexing_drill volume mount",
+        )
+
+    def test_api_indexing_volume_preserved(self) -> None:
+        """The original indexing mount must still be present."""
+        volumes: list[str] = self.svc.get("volumes", [])
+        self.assertIn("./indexing:/app/indexing:rw", volumes)
+
+    # -- environment -----------------------------------------------------------
+
+    def test_api_graph_internal_token_present(self) -> None:
+        env_list: list[str] = self.svc.get("environment", [])
+        self.assertIn("GRAPH_INTERNAL_TOKEN=${GRAPH_INTERNAL_TOKEN:-}", env_list)
+
+    def test_api_graph_ground_import_root_present(self) -> None:
+        env_list: list[str] = self.svc.get("environment", [])
+        self.assertIn(
+            "GRAPH_GROUND_IMPORT_ROOT=/app/indexing/ground_graph_fill", env_list,
+        )
+
+    def test_api_graph_drill_import_root_present(self) -> None:
+        env_list: list[str] = self.svc.get("environment", [])
+        self.assertIn(
+            "GRAPH_DRILL_IMPORT_ROOT=/app/indexing_drill/drill_graph_fill", env_list,
+        )
+
+    # -- no hardcoded secret ---------------------------------------------------
+
+    def test_api_no_hardcoded_token_value(self) -> None:
+        """GRAPH_INTERNAL_TOKEN must use compose interpolation, not a literal."""
+        env_list: list[str] = self.svc.get("environment", [])
+        for entry in env_list:
+            if not entry.startswith("GRAPH_INTERNAL_TOKEN="):
+                continue
+            value = entry.split("=", 1)[1]
+            # The value must look like a compose variable interpolation
+            # (${VAR:-...}), not a bare string secret.
+            self.assertRegex(
+                value,
+                r"^\$\{.+\}$",
+                "GRAPH_INTERNAL_TOKEN value must be compose interpolation, "
+                "got literal: {!r}".format(value),
+            )
+            break
+        else:
+            self.fail("GRAPH_INTERNAL_TOKEN not found in api environment")
+
+
+class GraphWorkerEnvironmentExtensionTests(unittest.TestCase):
+    """Assert graphrag-worker env carries graph-import variables."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.compose = _load_compose()
+        cls.svc = cls.compose["services"]["graphrag-worker"]
+
+    def test_worker_graph_internal_token_present(self) -> None:
+        env_list: list[str] = self.svc.get("environment", [])
+        self.assertIn("GRAPH_INTERNAL_TOKEN=${GRAPH_INTERNAL_TOKEN:-}", env_list)
+
+    def test_worker_main_api_internal_url_present(self) -> None:
+        env_list: list[str] = self.svc.get("environment", [])
+        self.assertIn(
+            "MAIN_API_INTERNAL_URL=http://api:5050/api/data/graph/internal/import",
+            env_list,
+        )
+
+    def test_worker_graph_import_timeout_present(self) -> None:
+        env_list: list[str] = self.svc.get("environment", [])
+        self.assertIn("GRAPH_IMPORT_TIMEOUT=${GRAPH_IMPORT_TIMEOUT:-1800}", env_list)
+
+    def test_worker_no_hardcoded_token_value(self) -> None:
+        """GRAPH_INTERNAL_TOKEN must use compose interpolation, not a literal."""
+        env_list: list[str] = self.svc.get("environment", [])
+        for entry in env_list:
+            if not entry.startswith("GRAPH_INTERNAL_TOKEN="):
+                continue
+            value = entry.split("=", 1)[1]
+            self.assertRegex(
+                value,
+                r"^\$\{.+\}$",
+                "GRAPH_INTERNAL_TOKEN value must be compose interpolation, "
+                "got literal: {!r}".format(value),
+            )
+            break
+        else:
+            self.fail("GRAPH_INTERNAL_TOKEN not found in worker environment")
+
+
 class GraphWorkerDockerfileTests(unittest.TestCase):
     """Assert docker/graphrag.Dockerfile pins and startup command."""
 

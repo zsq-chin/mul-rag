@@ -551,11 +551,37 @@ class GraphDatabase:
             outputs = knowledge_base.embed_model.encode([text])[0]
             return outputs
 
-    def set_embedding(self, tx, entity_name, embedding):
-        tx.run("""
-        MATCH (e:Entity {name: $name})
-        CALL db.create.setNodeVectorProperty(e, 'embedding', $embedding)
-        """, name=entity_name, embedding=embedding)
+    def set_embedding(self, tx, entity_name, embedding, namespace=None):
+        if namespace is None:
+            tx.run("""
+            MATCH (e:Entity {name: $name})
+            CALL db.create.setNodeVectorProperty(e, 'embedding', $embedding)
+            """, name=entity_name, embedding=embedding)
+        else:
+            tx.run("""
+            MATCH (e:Entity {name: $name, kgdb_name: $namespace})
+            CALL db.create.setNodeVectorProperty(e, 'embedding', $embedding)
+            """, name=entity_name, embedding=embedding, namespace=namespace)
+
+    def get_namespace_counts(self, kgdb_name):
+        """Return node and relationship counts for a namespace via parameterized Cypher."""
+        def _read_counts(tx, namespace):
+            node_count = int(
+                tx.run(
+                    "MATCH (n:Entity {kgdb_name: $namespace}) RETURN count(n) AS cnt",
+                    namespace=namespace,
+                ).single()["cnt"]
+            )
+            relationship_count = int(
+                tx.run(
+                    "MATCH ()-[r:RELATION {kgdb_name: $namespace}]->() RETURN count(r) AS cnt",
+                    namespace=namespace,
+                ).single()["cnt"]
+            )
+            return {"node_count": node_count, "relationship_count": relationship_count}
+
+        with self.driver.session() as session:
+            return session.execute_read(_read_counts, kgdb_name)
 
     def get_graph_info(self, graph_name="neo4j"):
         self.use_database(graph_name)
@@ -660,34 +686,93 @@ class GraphDatabase:
             logger.error(f"加载图数据库信息失败：{e}")
             return False
 
-    def add_embedding_to_nodes(self, node_names=None, kgdb_name='neo4j'):
+    def add_embedding_to_nodes(self, node_names=None, kgdb_name='neo4j', namespace=None):
         """为节点添加嵌入向量
 
         Args:
             node_names (list, optional): 要添加嵌入向量的节点名称列表，None表示所有没有嵌入向量的节点
             kgdb_name (str, optional): 图数据库名称，默认为'neo4j'
+            namespace (str, optional): 命名空间，用于过滤节点
 
         Returns:
             int: 成功添加嵌入向量的节点数量
         """
-        self.use_database(kgdb_name)
+        self.use_database(self.kgdb_name if namespace is not None else kgdb_name)
 
-        # 如果node_names为None，则获取所有没有嵌入向量的节点
-        if node_names is None:
-            node_names = self.query_nodes_without_embedding(kgdb_name)
+        def _read_names(tx):
+            """查询没有嵌入向量的节点名称"""
+            query = "MATCH (n:Entity) WHERE n.embedding IS NULL"
+            params = {}
+            if namespace is not None:
+                query += " AND n.kgdb_name = $namespace"
+                params["namespace"] = namespace
+            if node_names is not None:
+                query += " AND n.name IN $node_names"
+                params["node_names"] = node_names
+            query += " RETURN n.name AS name"
+            result = tx.run(query, **params)
+            return [record["name"] for record in result]
 
         count = 0
         with self.driver.session() as session:
-            for node_name in node_names:
+            names = session.execute_read(_read_names)
+            names = sorted(set(names))
+            for name in names:
                 try:
-                    embedding = self.get_embedding(node_name)
-                    session.execute_write(self.set_embedding, node_name, embedding)
+                    embedding = self.get_embedding(name)
+                    session.execute_write(self.set_embedding, name, embedding, namespace)
                     count += 1
                 except Exception as e:
-                    logger.error(f"为节点 '{node_name}' 添加嵌入向量失败: {e}, {traceback.format_exc()}")
+                    logger.error(f"为节点 '{name}' 添加嵌入向量失败: {e}, {traceback.format_exc()}")
 
         return count
 
+    def ensure_entity_vector_index(self, dimension=None):
+        if dimension is None:
+            dimension = config.embed_model_names[config.embed_model]['dimension']
+        dimension = int(dimension)
+        if dimension < 1 or dimension > 4096:
+            raise ValueError("dimension must be between 1 and 4096")
+
+        index_name = "entityEmbeddings"
+
+        with self.driver.session() as session:
+            def _check_index(tx):
+                result = tx.run(
+                    "SHOW INDEXES YIELD name, state WHERE name = $index_name RETURN name, state",
+                    index_name=index_name,
+                )
+                for record in result:
+                    return record
+                return None
+
+            record = session.execute_read(_check_index)
+
+            if record is not None and record['state'] == 'ONLINE':
+                return True
+
+            if record is None:
+                def _create_index(tx):
+                    tx.run(
+                        "CREATE VECTOR INDEX entityEmbeddings IF NOT EXISTS "
+                        "FOR (n:Entity) ON (n.embedding) "
+                        "OPTIONS {indexConfig: {"
+                        "`vector.dimensions`: $dimension, "
+                        "`vector.similarity_function`: 'cosine'"
+                        "}}",
+                        dimension=dimension,
+                    )
+                session.execute_write(_create_index)
+
+            def _await_index(tx):
+                result = tx.run("CALL db.awaitIndex('entityEmbeddings', 300)")
+                try:
+                    return result.single()
+                except Exception:
+                    return None
+
+            session.execute_read(_await_index)
+            return True
 
     def _extract_relationship_info(self, relationship, source_name=None, target_name=None, node_dict=None):
         """

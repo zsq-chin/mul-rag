@@ -8,7 +8,7 @@ from email.quoprimime import unquote
 
 from pydantic import BaseModel
 from fastapi import Response
-from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Body, Form, Query
+from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Body, Form, Query, Header
 from fastapi.responses import FileResponse
 from urllib.parse import unquote, quote
 
@@ -18,7 +18,8 @@ from src.utils import logger, hashstr
 from src import executor, retriever, config, knowledge_base, graph_base
 from server.utils.auth_middleware import get_required_user, get_superadmin_user
 from server.models.user_model import User
-from typing import List, Optional
+from server.services.graph_import import GraphImportService, internal_token_matches, resolve_import_artifact
+from typing import List, Literal, Optional
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import time
@@ -606,4 +607,53 @@ async def update_database_info(
     except Exception as e:
         logger.error(f"更新数据库失败 {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=f"更新数据库失败: {e}")
+
+
+class InternalGraphImportRequest(BaseModel):
+    task_id: str
+    graph_type: Literal['ground', 'drill']
+    artifact_path: str
+
+
+@data.post('/graph/internal/import')
+def internal_import_graph_artifact(
+    request: InternalGraphImportRequest,
+    x_graph_internal_token: str | None = Header(default=None, alias='X-Graph-Internal-Token'),
+):
+    # 1. Validate internal token.
+    if not internal_token_matches(x_graph_internal_token):
+        raise HTTPException(status_code=401, detail='Invalid internal token')
+
+    # 2. Resolve the import artifact path.
+    try:
+        resolved_path = resolve_import_artifact(request.graph_type, request.artifact_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    # 3. Check graph database availability without leaking credentials.
+    if not hasattr(graph_base, 'driver') or graph_base.driver is None:
+        raise HTTPException(status_code=503, detail='Graph database unavailable')
+
+    # 4. Run the import.
+    try:
+        stats = GraphImportService(graph_base).import_csv(resolved_path, request.graph_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Graph import failed: {exc}")
+        raise HTTPException(status_code=500, detail='Graph import failed')
+
+    # 5. Return success response.
+    return {
+        'task_id': request.task_id,
+        'graph_type': request.graph_type,
+        'artifact_path': request.artifact_path,
+        'status': 'success',
+        'node_count': stats.node_count,
+        'relationship_count': stats.relationship_count,
+        'embedded_count': stats.embedded_count,
+        'vector_index_ready': stats.vector_index_ready,
+    }
 

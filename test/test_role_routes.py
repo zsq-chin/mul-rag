@@ -102,7 +102,11 @@ class RoleRouteTests(unittest.TestCase):
     def test_all_data_routes_require_superadmin(self):
         found = endpoints(parse_router("data_router.py"))
         self.assertIn("get_required_user", dependency_names(found["get_databases"]))
-        self.assert_guards("data_router.py", "get_superadmin_user", {"get_databases"})
+        self.assert_guards(
+            "data_router.py",
+            "get_superadmin_user",
+            {"get_databases", "internal_import_graph_artifact"},
+        )
 
     def test_other_managed_routes_require_superadmin(self):
         for filename in (
@@ -198,6 +202,25 @@ class RoleRouteTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 400)
 
         transition(target, "admin", superadmin_count=2)
+
+    def test_internal_import_graph_artifact_has_no_depends_and_calls_security(self):
+        """The internal import endpoint must have no Depends (user/admin)
+        and must call internal_token_matches, resolve_import_artifact,
+        and GraphImportService."""
+        found = endpoints(parse_router("data_router.py"))
+        self.assertIn("internal_import_graph_artifact", found)
+        node = found["internal_import_graph_artifact"]
+
+        deps = dependency_names(node)
+        for guard in ("get_required_user", "get_superadmin_user", "get_admin_user"):
+            self.assertNotIn(guard, deps, f"Endpoint must not have Depends({guard})")
+
+        calls = call_names(node)
+        for required in ("internal_token_matches", "resolve_import_artifact", "GraphImportService"):
+            self.assertIn(
+                required, calls,
+                f"Endpoint must call {required}; found: {sorted(calls)}",
+            )
 
 
 if __name__ == "__main__":
