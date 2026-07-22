@@ -1,12 +1,14 @@
 import os
+import re
 import asyncio
 import traceback
+import httpx
 import fastapi
 from distutils.file_util import copy_file
 import subprocess
 from email.quoprimime import unquote
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import Response
 from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Body, Form, Query, Header
 from fastapi.responses import FileResponse
@@ -19,6 +21,7 @@ from src import executor, retriever, config, knowledge_base, graph_base
 from server.utils.auth_middleware import get_required_user, get_superadmin_user
 from server.models.user_model import User
 from server.services.graph_import import GraphImportService, internal_token_matches, resolve_import_artifact
+from server.services.http_clients import get_graph_worker_client
 from typing import List, Literal, Optional
 from fastapi.responses import JSONResponse
 from pathlib import Path
@@ -656,4 +659,97 @@ def internal_import_graph_artifact(
         'embedded_count': stats.embedded_count,
         'vector_index_ready': stats.vector_index_ready,
     }
+
+
+# ---------------------------------------------------------------------------
+# Graph job proxy -- forwards to the graphrag worker's durable job API.
+# ---------------------------------------------------------------------------
+
+_VALID_TASK_ID = re.compile(r'[0-9a-f]{32}')
+
+
+def _validate_task_id(task_id: str) -> str:
+    """Reject anything that is not exactly 32 lowercase hex characters.
+
+    This matches the worker's real ID format and blocks traversal attempts
+    (``..``, encoded slashes, uppercase, punctuation, wrong length).
+    """
+    if not _VALID_TASK_ID.fullmatch(task_id):
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid task_id: must be exactly 32 lowercase hexadecimal characters",
+        )
+    return task_id
+
+
+class GraphJobCreateRequest(BaseModel):
+    graph_type: Literal['ground', 'drill']
+
+
+async def _proxy_graph_worker(
+    method: str,
+    path: str,
+    *,
+    json_body: dict | None = None,
+) -> JSONResponse:
+    """Forward a request to the graphrag worker and return a faithful proxy
+    response.  Upstream 404/409/5xx are mapped to the same status codes; a
+    success-shaped body is never returned on upstream failure."""
+    client = get_graph_worker_client()
+    try:
+        resp = await client.request(method, path, json=json_body)
+    except httpx.ConnectError:
+        raise HTTPException(status_code=502, detail="Graph worker unreachable")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Graph worker timeout")
+    except httpx.HTTPError as exc:
+        logger.error(f"Graph worker proxy error: {exc}")
+        raise HTTPException(status_code=502, detail="Graph worker error")
+
+    # Faithfully propagate upstream status and body.
+    try:
+        body = resp.json()
+    except Exception:
+        body = {"detail": resp.text}
+
+    return JSONResponse(status_code=resp.status_code, content=body)
+
+
+@data.post('/graph/jobs')
+async def graph_job_submit(
+    request: GraphJobCreateRequest,
+    current_user: User = Depends(get_superadmin_user),
+):
+    """Submit a new graph build job via the worker."""
+    return await _proxy_graph_worker('POST', '/jobs', json_body=request.model_dump())
+
+
+@data.get('/graph/jobs/{task_id}')
+async def graph_job_get(
+    task_id: str,
+    current_user: User = Depends(get_superadmin_user),
+):
+    """Get job status from the worker."""
+    _validate_task_id(task_id)
+    return await _proxy_graph_worker('GET', f'/jobs/{task_id}')
+
+
+@data.post('/graph/jobs/{task_id}/cancel')
+async def graph_job_cancel(
+    task_id: str,
+    current_user: User = Depends(get_superadmin_user),
+):
+    """Request cancellation of an active job."""
+    _validate_task_id(task_id)
+    return await _proxy_graph_worker('POST', f'/jobs/{task_id}/cancel')
+
+
+@data.post('/graph/jobs/{task_id}/retry')
+async def graph_job_retry(
+    task_id: str,
+    current_user: User = Depends(get_superadmin_user),
+):
+    """Retry a terminal (failed/cancelled/interrupted) job."""
+    _validate_task_id(task_id)
+    return await _proxy_graph_worker('POST', f'/jobs/{task_id}/retry')
 

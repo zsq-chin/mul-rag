@@ -5,7 +5,10 @@ from typing import Any, AsyncIterator
 import httpx
 
 
+GRAPH_WORKER_URL = os.getenv("GRAPH_WORKER_URL", "http://graphrag-worker:8111")
+
 _multimodal_client: httpx.AsyncClient | None = None
+_graph_worker_client: httpx.AsyncClient | None = None
 
 
 def _env_float(name: str, default: float) -> float:
@@ -54,9 +57,40 @@ async def close_multimodal_client() -> None:
     _multimodal_client = None
 
 
+def get_graph_worker_client() -> httpx.AsyncClient:
+    """Return a shared async client for proxying to the graphrag worker."""
+    global _graph_worker_client
+    if _graph_worker_client is None or _graph_worker_client.is_closed:
+        timeout = httpx.Timeout(
+            connect=_env_float("GRAPH_WORKER_CONNECT_TIMEOUT", 5.0),
+            read=_env_float("GRAPH_WORKER_READ_TIMEOUT", 30.0),
+            write=_env_float("GRAPH_WORKER_WRITE_TIMEOUT", 10.0),
+            pool=_env_float("GRAPH_WORKER_POOL_TIMEOUT", 5.0),
+        )
+        limits = httpx.Limits(
+            max_connections=_env_int("GRAPH_WORKER_MAX_CONNECTIONS", 10),
+            max_keepalive_connections=_env_int("GRAPH_WORKER_MAX_KEEPALIVE", 5),
+        )
+        _graph_worker_client = httpx.AsyncClient(
+            base_url=GRAPH_WORKER_URL,
+            timeout=timeout,
+            limits=limits,
+            follow_redirects=False,
+        )
+    return _graph_worker_client
+
+
+async def close_graph_worker_client() -> None:
+    global _graph_worker_client
+    if _graph_worker_client is not None and not _graph_worker_client.is_closed:
+        await _graph_worker_client.aclose()
+    _graph_worker_client = None
+
+
 @asynccontextmanager
 async def multimodal_client_lifespan(_app: Any) -> AsyncIterator[None]:
     try:
         yield
     finally:
         await close_multimodal_client()
+        await close_graph_worker_client()

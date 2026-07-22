@@ -48,7 +48,6 @@
 
           <div class="actions-right">
             <div class="status-wrapper">
-<!--              <div class="status-indicator" :class="graphStatusClass"></div>-->
             </div>
             <!-- 上传和索引 -->
             <a-button type="primary" @click="state.showModal = true"><UploadOutlined /> 实体添加</a-button>
@@ -67,8 +66,96 @@
         <h3>图谱操作</h3>
         <div class="control-actions">
           <a-button type="primary" @click="state.showGraphModal = true"><UploadOutlined /> 上传生成图谱文件</a-button>
-          <a-button type="primary" @click="generateGraph" :loading="state.generatingGraph" :disabled="state.generatingGraph">生成图谱</a-button>
+
+          <!-- 构建按钮：空闲或任务已完成时显示 -->
+          <a-button
+            v-if="!currentJob || currentJob.status === 'completed'"
+            type="primary"
+            @click="submitBuildJob"
+            :loading="state.submittingJob"
+            :disabled="state.submittingJob"
+          >
+            生成图谱
+          </a-button>
+
+          <!-- 任务进度面板 -->
+          <div v-if="currentJob" class="job-progress-panel">
+            <div class="job-progress-header">
+              <span class="job-stage-label">{{ stageLabel(currentJob.stage || currentJob.status) }}</span>
+              <span class="job-status-badge" :class="statusClass(currentJob.status)">{{ statusLabel(currentJob.status) }}</span>
+            </div>
+
+            <a-progress
+              :percent="currentJob.progress || 0"
+              :status="progressStatus"
+              :show-info="true"
+            />
+
+            <div class="job-meta">
+              <div v-if="currentJob.started_at" class="job-meta-item">
+                <span class="meta-label">耗时</span>
+                <span class="meta-value">{{ formatElapsed(currentJob.started_at, currentJob.finished_at) }}</span>
+              </div>
+              <div v-if="currentJob.input_count != null" class="job-meta-item">
+                <span class="meta-label">输入</span>
+                <span class="meta-value">{{ currentJob.input_count }} 条</span>
+              </div>
+              <div v-if="currentJob.relationship_count != null" class="job-meta-item">
+                <span class="meta-label">关系</span>
+                <span class="meta-value">{{ currentJob.relationship_count }} 条</span>
+              </div>
+            </div>
+
+            <!-- 日志/错误摘要 -->
+            <div v-if="currentJob.error_summary" class="job-error">
+              {{ currentJob.error_summary }}
+            </div>
+            <div v-else-if="currentJob.log_tail" class="job-log">
+              {{ currentJob.log_tail }}
+            </div>
+
+            <!-- 成功提示 -->
+            <a-alert
+              v-if="currentJob.status === 'completed' && currentJob.progress === 100"
+              message="知识图谱生成成功"
+              type="success"
+              show-icon
+              class="job-alert"
+            />
+
+            <!-- 失败提示 -->
+            <a-alert
+              v-if="currentJob.status === 'failed'"
+              message="图谱构建失败"
+              :description="currentJob.error_summary || '请检查日志'"
+              type="error"
+              show-icon
+              class="job-alert"
+            />
+
+            <!-- 操作按钮 -->
+            <div class="job-actions">
+              <a-button
+                v-if="isActive"
+                type="default"
+                danger
+                :loading="state.cancellingJob"
+                @click="cancelBuildJob"
+              >
+                取消
+              </a-button>
+              <a-button
+                v-if="isRetryable"
+                type="default"
+                :loading="state.retryingJob"
+                @click="retryBuildJob"
+              >
+                重试
+              </a-button>
+            </div>
+          </div>
         </div>
+
         <div class="uploaded-files">
           <h4 class="uploaded-title">📁 已上传文件</h4>
 
@@ -200,24 +287,22 @@
 
 <script setup>
 import { Graph } from "@antv/g6";
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, onBeforeUnmount, reactive, ref } from 'vue';
 import { message, Button as AButton } from 'ant-design-vue';
 import { useConfigStore } from '@/stores/config';
 import { UploadOutlined, SyncOutlined } from '@ant-design/icons-vue';
 import HeaderComponent from '@/components/HeaderComponent.vue';
 import { graphApi } from '@/apis/admin_api';
+import { useGraphJobStore } from '@/stores/graphJobs';
 import { useUserStore } from '@/stores/user';
 import axios from 'axios';
+
 const configStore = useConfigStore();
+const graphJobStore = useGraphJobStore();
 const cur_embed_model = computed(() => configStore.config?.embed_model_names?.[configStore.config?.embed_model]?.name || '');
 const modelMatched = computed(() => !graphInfo?.value?.embed_model_name || graphInfo.value.embed_model_name === cur_embed_model.value)
 const disabled = computed(() => state.precessing || !modelMatched.value)
-const graphworkApi = {
-  initIndex: () => axios.post("http://localhost:8111/init_index").then(res => res.data),
-  buildGraph: () => axios.post("http://localhost:8111/build_graph").then(res => res.data),
-  build_drillGraph:() => axios.post("http://localhost:8111/build_drillgraph").then(res => res.data),
-  loadgraphFile: () => axios.post("http://localhost:8000/get_file_list/${directoryType.value}").then(res => res.data),
-}
+
 let graphInstance
 const graphInfo = ref(null)
 const container = ref(null);
@@ -231,12 +316,111 @@ const downloadableFiles = ref([]); // 用于存储可下载的文件列表
 const loading = ref(true); // 控制加载状态
 const activeGraphType = ref('ground'); // 默认选中地面工程知识图谱  directoryType改成这个
 
-const setGraphType = (type) => {
-  if (state.generatingGraph) {
-    alert('图谱正在生成中，请勿切换类型！');
-    return;
-  }
+// --- 任务进度相关 ---
 
+const currentJob = computed(() => graphJobStore.getJob(activeGraphType.value))
+
+const isActive = computed(() => {
+  const j = currentJob.value
+  if (!j) return false
+  return ['queued', 'copying', 'building', 'converting', 'importing', 'indexing'].includes(j.status)
+})
+
+const isRetryable = computed(() => {
+  const j = currentJob.value
+  if (!j) return false
+  return ['failed', 'cancelled', 'interrupted'].includes(j.status)
+})
+
+const progressStatus = computed(() => {
+  const j = currentJob.value
+  if (!j) return 'normal'
+  if (j.status === 'completed' && j.progress === 100) return 'success'
+  if (j.status === 'failed') return 'exception'
+  if (j.status === 'cancelled' || j.status === 'interrupted') return 'exception'
+  return 'active'
+})
+
+const STAGE_LABELS = {
+  queued: '排队中',
+  copying: '复制文件',
+  building: '构建图谱',
+  converting: '转换格式',
+  importing: '导入数据',
+  indexing: '建立索引',
+  completed: '已完成',
+  failed: '失败',
+  cancelling: '取消中',
+  cancelled: '已取消',
+  interrupted: '已中断',
+}
+
+function stageLabel(stage) {
+  return STAGE_LABELS[stage] || stage || '未知'
+}
+
+function statusLabel(status) {
+  return STAGE_LABELS[status] || status || '未知'
+}
+
+function statusClass(status) {
+  if (['completed'].includes(status)) return 'status-success'
+  if (['failed', 'cancelled', 'interrupted'].includes(status)) return 'status-error'
+  if (['cancelling'].includes(status)) return 'status-warning'
+  return 'status-active'
+}
+
+function formatElapsed(startedAt, finishedAt) {
+  if (!startedAt) return '-'
+  const start = new Date(startedAt).getTime()
+  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now()
+  const seconds = Math.max(0, Math.floor((end - start) / 1000))
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  if (m > 0) return `${m}分${s}秒`
+  return `${s}秒`
+}
+
+async function submitBuildJob() {
+  state.submittingJob = true
+  try {
+    await graphJobStore.submitJob(activeGraphType.value)
+    message.info('图谱构建任务已提交')
+  } catch (error) {
+    console.error('提交任务失败:', error)
+    message.error(error.message || '提交任务失败')
+  } finally {
+    state.submittingJob = false
+  }
+}
+
+async function cancelBuildJob() {
+  state.cancellingJob = true
+  try {
+    await graphJobStore.cancelJob(activeGraphType.value)
+    message.info('取消请求已发送')
+  } catch (error) {
+    console.error('取消失败:', error)
+    message.error(error.message || '取消失败')
+  } finally {
+    state.cancellingJob = false
+  }
+}
+
+async function retryBuildJob() {
+  state.retryingJob = true
+  try {
+    await graphJobStore.retryJob(activeGraphType.value)
+    message.info('重试任务已提交')
+  } catch (error) {
+    console.error('重试失败:', error)
+    message.error(error.message || '重试失败')
+  } finally {
+    state.retryingJob = false
+  }
+}
+
+const setGraphType = (type) => {
   activeGraphType.value = type;
   fetchFileList();
   fetchDownloadableFiles();
@@ -263,12 +447,16 @@ const graphState = reactive({
 const state = reactive({
   fetching: false,
   loadingGraphInfo: false,
-  generatingGraph: false,   // 生成图谱按钮 loading 状态
   searchInput: '',
   searchLoading: false,
   showModal: false,
   precessing: false,
   indexing: false,
+  submittingJob: false,
+  cancellingJob: false,
+  retryingJob: false,
+  showGraphModal: false,
+  generating: false,
   showPage: computed(() => configStore.config.enable_knowledge_base && configStore.config.enable_knowledge_graph),
 })
 
@@ -291,9 +479,6 @@ const loadGraphInfo = () => {
     })
 }
 
-const generating = ref(false); // 显示加载状态
-const generateSuccess = ref(false); // 上传/生成状态
-
 const handleDocumentForGraphrag = async () => {
   const files = graphFileList.value
     .filter(file => file.status === 'done')
@@ -305,7 +490,6 @@ const handleDocumentForGraphrag = async () => {
   }
 
   state.generating = true      // ✅ 按钮 loading & 禁用
-  generateSuccess.value = false
 
   try {
     for (const [index, filePath] of files.entries()) {
@@ -324,39 +508,13 @@ const handleDocumentForGraphrag = async () => {
 
     // 所有文件处理完成
     alert('所有文件预处理已完成 ✅')
-    generateSuccess.value = true
   } catch (error) {
     console.error('预处理过程中出错:', error)
     alert('预处理失败 ❌')
-    generateSuccess.value = false
   } finally {
     state.generating = false      // ✅ 恢复按钮可点击
   }
 }
-
-const generateGraph = async () => {
-  state.generatingGraph = true;  // 开始转圈
-  try {
-    let graphRes;
-    if (activeGraphType.value === "ground") {
-      graphRes = await graphApi.buildGraph();
-    } else {
-      graphRes = await graphApi.build_drillGraph();
-    }
-    if (graphRes.status === '图谱构建成功') {
-      console.log('✅ 知识图谱生成成功');
-      alert('知识图谱生成成功 ✅');
-    } else {
-      console.warn('✅ 知识图谱生成成功', graphRes);
-      alert('✅ 知识图谱生成成功');
-    }
-  } catch (error) {
-    console.error('生成图谱出错', error);
-    alert('✅ 知识图谱生成成功');
-  } finally {
-    state.generatingGraph = false; // 停止转圈
-  }
-};
 
 /**
  * 格式化文件大小（字节 -> KB/MB/GB）
@@ -460,7 +618,7 @@ const downloadFile = async (file) => {
     const encodedFilename = encodeURIComponent(fileName);
     const url = `/api/data/graph/download_file/${activeGraphType.value}/${encodedFilename}`;
 
-    const response = await fetch(url);
+    const response = await fetch(url, { headers: getAuthHeaders() });
 
     if (!response.ok) {
       // 处理错误响应
@@ -578,7 +736,6 @@ const readFileContent = (file) => {
     reader.readAsText(file, 'utf-8'); // 这里假设是文本文件
   });
 };
-
 
 
 
@@ -1059,7 +1216,15 @@ onMounted(() => {
   fetchDownloadableFiles();
   loadGraphInfo();
   loadSampleNodes();
-}); 
+  // 恢复持久化的活跃任务
+  graphJobStore.recoverJobs();
+});
+
+onBeforeUnmount(() => {
+  // 清理所有轮询定时器，防止泄漏
+  graphJobStore.dispose();
+  window.removeEventListener('resize', randerGraph);
+});
 
 
 const handleFileUpload = (event) => {
@@ -1306,6 +1471,112 @@ const getAuthHeaders = () => {
   }
 }
 
+/* 任务进度面板 */
+.job-progress-panel {
+  background: var(--surface-raised);
+  border-radius: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+}
+
+.job-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.job-stage-label {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.job-status-badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 500;
+
+  &.status-active {
+    background: #e6f7ff;
+    color: #1890ff;
+  }
+  &.status-success {
+    background: #f6ffed;
+    color: #52c41a;
+  }
+  &.status-error {
+    background: #fff2f0;
+    color: #ff4d4f;
+  }
+  &.status-warning {
+    background: #fffbe6;
+    color: #faad14;
+  }
+}
+
+.job-meta {
+  display: flex;
+  gap: 16px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.job-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.meta-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.meta-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.job-error {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #fff2f0;
+  border: 1px solid #ffccc7;
+  border-radius: 4px;
+  color: #cf1322;
+  font-size: 13px;
+  max-height: 80px;
+  overflow-y: auto;
+  word-break: break-all;
+}
+
+.job-log {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  max-height: 80px;
+  overflow-y: auto;
+  word-break: break-all;
+  font-family: monospace;
+}
+
+.job-alert {
+  margin-top: 10px;
+}
+
+.job-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .uploaded-files,
 .downloaded-files {
   background: var(--surface-raised);
@@ -1396,5 +1667,58 @@ li:last-child {
   gap: 12px;
 }
 
+/* ---- Mobile breakpoint (<= 768px) ---- */
+@media (max-width: 768px) {
+  /* Header: let title and actions stack when space is tight */
+  :deep(.header-content) {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  :deep(.header-actions) {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  /* Actions: stack vertically so nothing overflows right */
+  .actions {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .actions-left,
+  .actions-right {
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+  }
+
+  /* Main content: stack vertically, natural height */
+  .main-content {
+    flex-direction: column;
+    height: auto;
+    gap: 12px;
+    padding: 10px;
+  }
+
+  /* Control panel: full width */
+  .control-panel {
+    width: 100%;
+  }
+
+  /* Graph panel: stable useful height instead of being pushed off-screen */
+  .graph-panel {
+    min-height: 400px;
+  }
+
+  /* Container: adapt to mobile viewport */
+  #container {
+    width: calc(100% - 20px);
+    height: calc(100vh - 260px);
+    min-height: 300px;
+    margin: 10px;
+    resize: none;
+  }
+}
 
 </style>

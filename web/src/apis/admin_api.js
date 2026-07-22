@@ -232,7 +232,7 @@ export const graphApi = {
    * @returns {Promise} - 图数据库状态
    */
   getGraphInfo: async () => {
-    checkAdminPermission()
+    checkSuperAdminPermission()
     return apiGet('/api/data/graph', {}, true)
   },
 
@@ -243,7 +243,7 @@ export const graphApi = {
    * @returns {Promise} - 节点数据
    */
   getNodes: async (dbName, num) => {
-    checkAdminPermission()
+    checkSuperAdminPermission()
     return apiGet(`/api/data/graph/nodes?kgdb_name=${dbName}&num=${num}`, {}, true)
   },
 
@@ -253,7 +253,7 @@ export const graphApi = {
    * @returns {Promise} - 查询结果
    */
   queryNode: async (entityName) => {
-    checkAdminPermission()
+    checkSuperAdminPermission()
     return apiGet(`/api/data/graph/node?entity_name=${entityName}`, {}, true)
   },
 
@@ -263,43 +263,43 @@ export const graphApi = {
    * @returns {Promise} - 添加结果
    */
   addByJsonl: async (filePath) => {
-    checkAdminPermission()
+    checkSuperAdminPermission()
     return apiPost('/api/data/graph/add-by-jsonl', { file_path: filePath }, {}, true)
   },
 
   addForGraphrag: async (filePath) => {
-    checkAdminPermission()
+    checkSuperAdminPermission()
     return apiPost('/api/data/graph/add-for-graphrag', { file_path: filePath }, {}, true)
   },
   //对文件预处理调用mineru
   file_handle: async (filePath) => {
-  return apiPost('/api/data/graph/handle', { file_path: filePath })
-},
+    checkSuperAdminPermission()
+    return apiPost('/api/data/graph/handle', { file_path: filePath }, {}, true)
+  },
   buildGraph: async () => {
-  return apiPost('/api/data/graph/build_graph', {}, {}, true)
-},
+    checkSuperAdminPermission()
+    return apiPost('/api/data/graph/build_graph', {}, {}, true)
+  },
   build_drillGraph: async () => {
-  return apiPost('/api/data/graph/build_drillgraph', {}, {}, true)
-},
+    checkSuperAdminPermission()
+    return apiPost('/api/data/graph/build_drillgraph', {}, {}, true)
+  },
   getFileList: async (graphType) => {
-  return apiGet(`/api/data/graph/get_file_list/${graphType}`)
-},
+    checkSuperAdminPermission()
+    return apiGet(`/api/data/graph/get_file_list/${graphType}`, {}, true)
+  },
   getDownloadableFiles: async (graphType) => {
-  return apiGet(`/api/data/graph/get_downloadable_files/${graphType}`)
-},
+    checkSuperAdminPermission()
+    return apiGet(`/api/data/graph/get_downloadable_files/${graphType}`, {}, true)
+  },
   deleteGraphFile: async (graphType, fileName) => {
-    return apiDelete(`/api/data/graph/delete_file/${graphType}/${encodeURIComponent(fileName)}`);
+    checkSuperAdminPermission()
+    return apiDelete(`/api/data/graph/delete_file/${graphType}/${encodeURIComponent(fileName)}`, {}, true)
   },
   downloadFile: async (graphType, filename) => {
-  return apiGet(`/api/data/graph/download_file/${graphType}/${encodeURIComponent(filename)}`, {}, false, {
-    responseType: 'blob'
-  })
-  //新增下载文件方法
-  // downloadFile: async (graphType, filename) => {
-  //   return apiGet(`/api/data/graph/download_file/${graphType}/${filename}`, {
-  //     responseType: 'blob', // 重要：指定响应类型为 blob
-  // });
-},
+    checkSuperAdminPermission()
+    return apiGet(`/api/data/graph/download_file/${graphType}/${encodeURIComponent(filename)}`, {}, true)
+  },
 
 
   /**
@@ -308,7 +308,7 @@ export const graphApi = {
    * @returns {Promise} - 索引结果
    */
   indexNodes: async (dbName) => {
-    checkAdminPermission()
+    checkSuperAdminPermission()
     return apiPost('/api/data/graph/index-nodes', { kgdb_name: dbName }, {}, true)
   },
 }
@@ -386,6 +386,49 @@ export const logApi = {
   getLogs: async (params = {}) => {
     checkAdminPermission()
     return apiGet('/api/log', { params }, true)
+  },
+}
+
+// 图谱构建任务 API（superadmin only）
+export const graphJobApi = {
+  /**
+   * 提交图谱构建任务
+   * @param {string} graphType - 'ground' | 'drill'
+   * @returns {Promise} - 创建的任务记录
+   */
+  submitJob: async (graphType) => {
+    checkSuperAdminPermission()
+    return apiPost('/api/data/graph/jobs', { graph_type: graphType }, {}, true)
+  },
+
+  /**
+   * 获取任务状态
+   * @param {string} taskId - 任务ID
+   * @returns {Promise} - 任务记录
+   */
+  getJob: async (taskId) => {
+    checkSuperAdminPermission()
+    return apiGet(`/api/data/graph/jobs/${taskId}`, {}, true)
+  },
+
+  /**
+   * 取消活跃任务
+   * @param {string} taskId - 任务ID
+   * @returns {Promise} - 更新后的任务记录
+   */
+  cancelJob: async (taskId) => {
+    checkSuperAdminPermission()
+    return apiPost(`/api/data/graph/jobs/${taskId}/cancel`, {}, {}, true)
+  },
+
+  /**
+   * 重试失败/取消/中断的任务
+   * @param {string} taskId - 任务ID
+   * @returns {Promise} - 新的任务记录
+   */
+  retryJob: async (taskId) => {
+    checkSuperAdminPermission()
+    return apiPost(`/api/data/graph/jobs/${taskId}/retry`, {}, {}, true)
   },
 }
 
