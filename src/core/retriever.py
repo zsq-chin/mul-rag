@@ -6,6 +6,48 @@ from src.utils.logging_config import logger
 from src.models import select_model
 from src.core.operators import HyDEOperator
 from server.utils.multimodal_remote import format_multimodal_context, search_multimodal_remote
+from src.core.graph_retrieval import (
+    normalize_entities,
+    rank_unique_relations,
+    format_graph_context,
+    MAX_ENTITIES,
+    MAX_HOPS,
+    MAX_RELATIONS,
+)
+
+
+def _coerce_int(value, default, minimum, maximum):
+    """Coerce a value to an integer clamped to [minimum, maximum].
+
+    Returns *default* when the value is not a valid integer or falls below
+    *minimum*.  Values above *maximum* are clamped.
+    """
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    if v < minimum:
+        return default
+    return min(v, maximum)
+
+
+def _coerce_float(value, default, minimum, maximum):
+    """Coerce a value to a float clamped to [minimum, maximum].
+
+    Returns *default* when the value is not a valid float, is NaN, or is
+    infinite.  Values below *minimum* return *default*; values above
+    *maximum* are clamped.
+    """
+    try:
+        v = float(value)
+        if v != v or v == float("inf") or v == float("-inf"):
+            return default
+    except (TypeError, ValueError):
+        return default
+    if v < minimum:
+        return default
+    return min(v, maximum)
+
 
 class Retriever:
 
@@ -47,13 +89,11 @@ class Retriever:
             kb_text = "\n".join(f"{r['id']}: {r['entity']['text']}" for r in kb_res)
             external_parts.extend(["知识库信息:", kb_text])
 
-        # 解析图数据库的结果
-        db_res = refs.get("graph_base", {}).get("results", {})
-        if db_res.get("nodes") and len(db_res["nodes"]) > 0:
-            db_text = "\n".join(
-                [f"{edge['source_name']}和{edge['target_name']}的关系是{edge['type']}" for edge in db_res.get("edges", [])]
-            )
-            external_parts.extend(["图数据库信息:", db_text])
+        # 解析图数据库的结果 – prefer pre-formatted context from query_graph
+        graph_refs = refs.get("graph_base", {})
+        graph_context = graph_refs.get("context", "")
+        if graph_context:
+            external_parts.extend(["图数据库信息:", graph_context])
 
         # 解析网络搜索的结果
         web_res = refs.get("web_search", {}).get("results", [])
@@ -91,15 +131,64 @@ class Retriever:
         raise NotImplementedError
 
     def query_graph(self, query, history, refs):
-        results = []
-        if refs["meta"].get("use_graph") and config.enable_knowledge_base:
-            for entity in refs["entities"]:
-                if entity == "":
-                    continue
-                result = graph_base.query_node(entity)
-                if result != []:
-                    results.extend(result)
-        return {"results": graph_base.format_query_result_to_graph(results)}
+        if not (refs["meta"].get("use_graph") and config.enable_knowledge_graph):
+            return {"results": {"nodes": [], "edges": []}}
+
+        try:
+            threshold = _coerce_float(
+                config.get("graph_similarity_threshold"), 0.5, 0.0, 1.0
+            )
+            hops = _coerce_int(config.get("graph_hops"), 2, 1, MAX_HOPS)
+            max_entities = _coerce_int(
+                config.get("graph_max_entities"), 5, 1, MAX_ENTITIES
+            )
+            max_relations = _coerce_int(
+                config.get("graph_max_relations"), 10, 1, MAX_RELATIONS
+            )
+            context_chars = _coerce_int(
+                config.get("graph_context_max_chars"), 2000, 100, 100000
+            )
+
+            entities = normalize_entities(refs.get("entities", []), max_entities)
+
+            if not entities:
+                raw_rows = graph_base.query_node(
+                    query,
+                    threshold=threshold,
+                    hops=hops,
+                    max_entities=max_entities,
+                    max_relations=max_relations,
+                )
+            else:
+                raw_rows = []
+                remaining_budget = max_relations
+                for entity in entities:
+                    if not entity or remaining_budget <= 0:
+                        continue
+                    rows = graph_base.query_node(
+                        entity,
+                        threshold=threshold,
+                        hops=hops,
+                        max_entities=max_entities,
+                        max_relations=remaining_budget,
+                    )
+                    if rows:
+                        raw_rows.extend(rows)
+                        remaining_budget -= len(rows)
+
+            ranked = rank_unique_relations(raw_rows, max_relations)
+            context = format_graph_context(ranked, max_chars=context_chars)
+            graph_result = graph_base.format_query_result_to_graph(ranked)
+
+            return {"results": graph_result, "context": context}
+        except Exception as e:
+            logger.error(f"Graph query error: {str(e)}")
+            return {
+                "error": "graph_query_failed",
+                "message": str(e),
+                "results": {"nodes": [], "edges": []},
+                "context": "",
+            }
 
 
     def query_knowledgebase(self, query, history, refs):

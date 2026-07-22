@@ -158,6 +158,12 @@ class Config(SimpleConfig):
         self.add_item("model_local_paths", default={}, des="本地模型路径")
         self.add_item("use_rewrite_query", default="on", des="重写查询", choices=["off", "on", "hyde"])
         self.add_item("device", default="cuda", des="运行本地模型的设备", choices=["cpu", "cuda"])
+        # 图谱检索配置
+        self.add_item("graph_similarity_threshold", default=0.5, des="图谱查询相似度阈值")
+        self.add_item("graph_hops", default=2, des="图谱查询跳数")
+        self.add_item("graph_max_entities", default=5, des="图谱查询最大实体数")
+        self.add_item("graph_max_relations", default=10, des="图谱查询最大关系数")
+        self.add_item("graph_context_max_chars", default=2000, des="图谱上下文最大字符数")
         ### <<< 默认配置结束
 
         self.load()

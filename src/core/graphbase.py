@@ -38,7 +38,7 @@ class GraphDatabase:
         self.start()
 
     def start(self):
-        if not config.enable_knowledge_graph or not config.enable_knowledge_base:
+        if not config.enable_knowledge_graph:
             return
 
         uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
@@ -52,8 +52,9 @@ class GraphDatabase:
             # 连接成功后保存图数据库信息
             self.save_graph_info(self.kgdb_name)
         except Exception as e:
-            logger.error(f"Failed to connect to Neo4j: {e}, {uri}, {self.kgdb_name}, {username}, {password}")
-            self.config.enable_knowledge_graph = False
+            logger.error(f"Failed to connect to Neo4j: {e}, {uri}, {self.kgdb_name}")
+            self.status = "closed"
+            config.enable_knowledge_graph = False
 
     def close(self):
         """关闭数据库连接"""
@@ -61,10 +62,9 @@ class GraphDatabase:
 
     def is_running(self):
         """检查图数据库是否正在运行"""
-        if not config.enable_knowledge_graph or not config.enable_knowledge_base:
+        if not config.enable_knowledge_graph:
             return False
-        else:
-            return self.status == "open"
+        return self.status == "open"
 
     def get_sample_nodes(self, kgdb_name='neo4j', num=50):
         """获取指定数据库的 num 个节点信息"""
@@ -226,21 +226,22 @@ class GraphDatabase:
             self.save_graph_info()
 
     async def jsonl_file_add_entity(self, file_path, kgdb_name='neo4j'):
+        prev_status = self.status
         self.status = "processing"
         kgdb_name = kgdb_name or 'neo4j'
-        self.use_database(kgdb_name)  # 切换到指定数据库
-        logger.info(f"Start adding entity to {kgdb_name} with {file_path}")
+        try:
+            self.use_database(kgdb_name)
+            logger.info(f"Start adding entity to {kgdb_name} with {file_path}")
 
-        def read_triples(file_path):
             with open(file_path, 'rb') as f:
                 raw_data = f.read(4096)
                 result = chardet.detect(raw_data)
                 encoding = result['encoding'] or 'utf-8'
                 print(f"检测到文件编码: {encoding}")
+
             triples = []
-            with open(file_path, encoding='gbk', errors='ignore') as csvfile:
+            with open(file_path, encoding=encoding, errors='ignore') as csvfile:
                 reader = csv.DictReader(csvfile)
-                # 期望列名: h, r, t
                 if not set(['h', 'r', 't']).issubset(reader.fieldnames):
                     raise ValueError("CSV 文件必须包含列: h, r, t")
                 for row in reader:
@@ -249,16 +250,12 @@ class GraphDatabase:
                         'r': row['r'].strip(),
                         't': row['t'].strip()
                     })
-            return triples
 
-        triples = list(read_triples(file_path))
-
-        await self.txt_add_vector_entity(triples, kgdb_name)
-
-        self.status = "open"
-        # 更新并保存图数据库信息
-        self.save_graph_info()
-        return kgdb_name
+            await self.txt_add_vector_entity(triples, kgdb_name)
+            self.save_graph_info()
+            return kgdb_name
+        finally:
+            self.status = prev_status
 
     def file_Handle(
             self,
@@ -379,9 +376,67 @@ class GraphDatabase:
         """
         tx.run(query)
 
-    def query_node(self, entity_name, threshold=0.78, kgdb_name='neo4j', hops=2, max_entities=5, **kwargs):
+    @staticmethod
+    def _sanitize_node_properties(props):
+        """Copy node properties, excluding embedding vectors.
+
+        Returns a *new* dict so driver-owned objects are never mutated.
+        """
+        sanitized = {}
+        for k, v in props.items():
+            if k in ("embedding", "entityEmbeddings"):
+                continue
+            sanitized[k] = v
+        return sanitized
+
+    @staticmethod
+    def _legacy_row_to_structured(row, entity_score):
+        """Convert one legacy ``[source_node, [rel, …], target_node]`` row
+        into a structured relation dict suitable for ``rank_unique_relations``.
+        """
+        fallback_src, relationships, fallback_tgt = row[0], row[1], row[2]
+
+        dicts = []
+        for rel in relationships:
+            rel_props = dict(getattr(rel, "_properties", {}))
+            relation_type = rel_props.get("type", "") or getattr(rel, "type", "unknown")
+            relation_desc = rel_props.get("description", "")
+            relation_id = getattr(rel, "element_id", None)
+
+            # Use each relationship's own endpoints when available.
+            rel_nodes = getattr(rel, "nodes", None)
+            if rel_nodes and len(rel_nodes) == 2:
+                src_node, tgt_node = rel_nodes
+            else:
+                src_node, tgt_node = fallback_src, fallback_tgt
+
+            src_props = dict(getattr(src_node, "_properties", {}))
+            tgt_props = dict(getattr(tgt_node, "_properties", {}))
+
+            dicts.append({
+                "source": src_props.get("name", "unknown"),
+                "source_id": getattr(src_node, "element_id", None),
+                "source_properties": GraphDatabase._sanitize_node_properties(src_props),
+                "source_desc": src_props.get("description", ""),
+                "target": tgt_props.get("name", "unknown"),
+                "target_id": getattr(tgt_node, "element_id", None),
+                "target_properties": GraphDatabase._sanitize_node_properties(tgt_props),
+                "target_desc": tgt_props.get("description", ""),
+                "relation": relation_type,
+                "relation_id": relation_id,
+                "relation_desc": relation_desc,
+                "score": entity_score,
+            })
+        return dicts
+
+    def query_node(self, entity_name, threshold=0.78, kgdb_name='neo4j', hops=2, max_entities=5, max_relations=100, **kwargs):
         """知识图谱查询节点的入口:"""
-        # TODO 添加判断节点数量为 0 停止检索
+        # Clamp max_relations to [1, 100]
+        try:
+            max_relations = int(max_relations)
+        except (TypeError, ValueError):
+            max_relations = 100
+        max_relations = max(1, min(max_relations, 100))
         # 判断是否启动
         if not self.is_running():
             raise Exception("图数据库未启动")
@@ -418,17 +473,46 @@ class GraphDatabase:
                 return []
             raise e
 
-        # 筛选出分数高于阈值的实体
-        qualified_entities = [result[0] for result in results[:max_entities] if result[1] > threshold]
-        logger.debug(f"Graph Query Entities: {entity_name}, {qualified_entities=}")
+        # 筛选出分数高于阈值的实体，保留分数用于下游引用
+        qualified_entities = [
+            (result[0], result[1])
+            for result in results[:max_entities]
+            if result[1] > threshold
+        ]
+        logger.debug(
+            f"Graph Query Entities: {entity_name}, "
+            f"{[e[0] for e in qualified_entities]=}"
+        )
 
-        # 对每个合格的实体进行查询
-        all_query_results = []
-        for entity in qualified_entities:
-            query_result = self.query_specific_entity(entity_name=entity, hops=hops, kgdb_name=kgdb_name)
-            all_query_results.extend(query_result)
+        # 对每个合格的实体进行查询，并转换为结构化行
+        structured_rows = []
+        remaining = max_relations
+        for entity, score in qualified_entities:
+            if remaining <= 0:
+                break
+            legacy_rows = self.query_specific_entity(
+                entity_name=entity, hops=hops, kgdb_name=kgdb_name,
+                limit=remaining,
+            )
+            for row in legacy_rows:
+                if remaining <= 0:
+                    break
+                if isinstance(row, dict):
+                    # Already structured (defensive) — copy to avoid
+                    # mutating caller-owned data when filling score.
+                    if "score" not in row:
+                        row = {**row, "score": score}
+                    structured_rows.append(row)
+                    remaining -= 1
+                elif isinstance(row, (list, tuple)) and len(row) >= 3 and isinstance(row[1], list):
+                    converted = self._legacy_row_to_structured(row, score)
+                    for r in converted:
+                        if remaining <= 0:
+                            break
+                        structured_rows.append(r)
+                        remaining -= 1
 
-        return all_query_results
+        return structured_rows
 
     def query_specific_entity(self, entity_name, kgdb_name='neo4j', hops=2, limit=100):
         """查询指定实体三元组信息（无向关系）"""
@@ -452,10 +536,7 @@ class GraphDatabase:
                     logger.info(f"未找到实体 {entity_name} 的相关信息")
                     return []
 
-                values = result.values()
-                # 安全地清理embedding属性
-                values = clean_triples_embedding(values)
-                return values
+                return result.values()
 
             except Exception as e:
                 logger.error(f"查询实体 {entity_name} 失败: {str(e)}")
@@ -831,65 +912,95 @@ class GraphDatabase:
         return formatted_results
 
     def format_query_result_to_graph(self, query_results):
-        """将检索到的结果转换为 {"nodes": [], "edges": []} 的格式
+        """Convert query results into {"nodes": [], "edges": []} format.
 
-        例如：
-        {
-            "nodes": [
-                {
-                    "id": "4:5efbff88-72ef-44f9-b867-6c0e164a4a13:103",
-                    "name": "张若锦"
-                },
-                {
-                    "id": "4:5efbff88-72ef-44f9-b867-6c0e164a4a13:20",
-                    "name": "贾宝玉"
-                },
-                ....
-            ],
-            "edges": [
-                {
-                    "id": "5:5efbff88-72ef-44f9-b867-6c0e164a4a13:71",
-                    "type": "奴仆",
-                    "source_id": "4:5efbff88-72ef-44f9-b867-6c0e164a4a13:88",
-                    "target_id": "4:5efbff88-72ef-44f9-b867-6c0e164a4a13:20",
-                    "source_name": "宋嬷嬷",
-                    "target_name": "贾宝玉"
-                },
-                ....
-            ]
-        }
+        Accepts two input shapes:
+
+        *Legacy Neo4j rows* – ``[source_node, [relationship, …], target_node]``
+          where nodes have ``element_id`` and ``_properties``.
+
+        *Structured relation dicts* – dictionaries produced by
+          ``rank_unique_relations`` with keys ``source``, ``target``,
+          ``relation``, ``score``, ``ref_id``, and optional
+          ``source_id``/``target_id``/``source_properties``/``target_properties``.
         """
         formatted_results = {"nodes": [], "edges": []}
         node_dict = {}
         edge_dict = {}
 
         for item in query_results:
-            # 检查数据格式
-            if len(item) < 2 or not isinstance(item[1], list):
-                continue
+            if isinstance(item, dict):
+                # Structured relation dict
+                src_name = item.get("source", "")
+                tgt_name = item.get("target", "")
+                src_id = item.get("source_id") or f"node:{src_name}"
+                tgt_id = item.get("target_id") or f"node:{tgt_name}"
 
-            node_dict[item[0].element_id] = dict(id=item[0].element_id, name=item[0]._properties.get("name", "Unknown"))
-            node_dict[item[2].element_id] = dict(id=item[2].element_id, name=item[2]._properties.get("name", "Unknown"))
+                src_props = item.get("source_properties")
+                tgt_props = item.get("target_properties")
+                if isinstance(src_props, dict):
+                    src_name = src_props.get("name", src_name)
+                if isinstance(tgt_props, dict):
+                    tgt_name = tgt_props.get("name", tgt_name)
 
-            # 处理关系列表中的每个关系
-            for i, relationship in enumerate(item[1]):
-                try:
-                    # 提取关系信息
-                    node_info, edge_info = self._extract_relationship_info(relationship, node_dict=node_dict)
-                    if node_info is None or edge_info is None:
-                        continue
+                node_dict[src_id] = {"id": src_id, "name": src_name}
+                node_dict[tgt_id] = {"id": tgt_id, "name": tgt_name}
 
-                    # 添加边
-                    edge_dict[edge_info["id"]] = edge_info
-                except Exception as e:
-                    logger.error(f"处理关系时出错: {e}, 关系: {relationship}, {traceback.format_exc()}")
+                relation = item.get("relation", "unknown")
+                # Prefer relation_id for a stable, deterministic edge ID;
+                # fall back to a composite of source, relation, and target.
+                relation_id = item.get("relation_id")
+                edge_id = relation_id if relation_id else f"{src_id}:{relation}:{tgt_id}"
+                edge_info = {
+                    "id": edge_id,
+                    "type": relation,
+                    "source_id": src_id,
+                    "target_id": tgt_id,
+                    "source_name": src_name,
+                    "target_name": tgt_name,
+                    "ref_id": item.get("ref_id", ""),
+                    "score": item.get("score", 0.0),
+                }
+                # Carry through descriptions and raw properties for sidebar use.
+                for desc_key in ("source_desc", "target_desc", "relation_desc"):
+                    if desc_key in item:
+                        edge_info[desc_key] = item[desc_key]
+                if src_props:
+                    edge_info["source_properties"] = src_props
+                if tgt_props:
+                    edge_info["target_properties"] = tgt_props
+                edge_dict[edge_id] = edge_info
+            elif isinstance(item, (list, tuple)) and len(item) >= 3:
+                # Legacy Neo4j format: [source_node, [rel, …], target_node]
+                if not isinstance(item[1], list):
                     continue
 
-        # 将节点字典转换为列表
+                node_dict[item[0].element_id] = dict(
+                    id=item[0].element_id,
+                    name=item[0]._properties.get("name", "Unknown"),
+                )
+                node_dict[item[2].element_id] = dict(
+                    id=item[2].element_id,
+                    name=item[2]._properties.get("name", "Unknown"),
+                )
+
+                for relationship in item[1]:
+                    try:
+                        node_info, edge_info = self._extract_relationship_info(
+                            relationship, node_dict=node_dict
+                        )
+                        if node_info is None or edge_info is None:
+                            continue
+                        edge_dict[edge_info["id"]] = edge_info
+                    except Exception as e:
+                        logger.error(
+                            f"处理关系时出错: {e}, "
+                            f"关系: {relationship}, {traceback.format_exc()}"
+                        )
+                        continue
+
         formatted_results["nodes"] = list(node_dict.values())
         formatted_results["edges"] = list(edge_dict.values())
-
-
         return formatted_results
 
 def clean_triples_embedding(triples):
