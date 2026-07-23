@@ -304,6 +304,7 @@ const modelMatched = computed(() => !graphInfo?.value?.embed_model_name || graph
 const disabled = computed(() => state.precessing || !modelMatched.value)
 
 let graphInstance
+let graphLoadRenderTimer = null
 const graphInfo = ref(null)
 const container = ref(null);
 const fileList = ref([]);
@@ -750,7 +751,11 @@ const loadSampleNodes = () => {
 
       // 计算节点指标后渲染图谱
       calculateNodeMetrics();
-      setTimeout(() => randerGraph(), 500)
+      clearTimeout(graphLoadRenderTimer);
+      graphLoadRenderTimer = setTimeout(() => {
+        graphLoadRenderTimer = null;
+        void randerGraph();
+      }, 500)
     })
     .catch((error) => {
       console.error(error)
@@ -795,7 +800,7 @@ const onSearch = () => {
 
       // 计算节点指标后渲染图谱
       calculateNodeMetrics();
-      randerGraph()
+      void randerGraph()
     })
     .catch((error) => {
       console.error('查询错误:', error);
@@ -1032,72 +1037,45 @@ const expandNode = async (nodeId) => {
   }
 };
 
-const randerGraph = () => {
-  if (graphInstance) {
-    graphInstance.destroy();
-  }
+const randerGraph = async () => {
+  if (!container.value) return;
 
-  initGraph();
-  const initialData = getInitialGraphData();
-  graphInstance.setData(initialData);
-  graphInstance.render();
+  try {
+    if (graphInstance) {
+      graphInstance.destroy();
+      graphInstance = null;
+    }
+
+    initGraph();
+    if (!graphInstance) return;
+    const renderingGraph = graphInstance;
+    try {
+      const initialData = getInitialGraphData();
+      renderingGraph.setData(initialData);
+      await renderingGraph.render();
+    } catch (err) {
+      console.error('Graph render failed:', err);
+      if (graphInstance === renderingGraph) {
+        renderingGraph.destroy();
+        graphInstance = null;
+        message.error('知识图谱渲染失败，请重试');
+      }
+    }
+  } catch (err) {
+    console.error('Graph initialization failed:', err);
+    if (graphInstance) {
+      graphInstance.destroy();
+      graphInstance = null;
+    }
+    message.error('知识图谱渲染失败，请重试');
+  }
 }
 
-// 修改 initGraph 函数，使用 G6 5.x 的正确事件处理
+// 初始化图谱实例，使用 G6 5.x 的正确事件处理
 const initGraph = () => {
+  if (!container.value) return;
+
   graphInstance = new Graph({
-    container: container.value,
-    width: container.value.offsetWidth,
-    height: container.value.offsetHeight,
-    autoFit: true,
-    autoResize: true,
-
-    data: {
-      nodes: [],
-      edges: [],
-    },
-
-    layout: {
-      type: 'd3-force',
-      preventOverlap: true,
-      collide: {
-        radius: 70,
-        strength: 0.5, // 碰撞强度
-      },
-    },
-
-    node: {
-      type: 'circle',
-      style: {
-        labelText: (d) => d.data.label,
-        // 使用节点度数来决定大小
-        size: (d) => {
-          const degree = d.data.degree || 0;
-          // 基础大小为15，每个连接增加5的大小，最小为15，最大为50
-          return Math.min(15 + degree * 5, 50);
-        },
-      },
-      palette: {
-        field: 'label',
-        color: 'tableau',
-      },
-    },
-    edge: {
-      type: 'line',
-      style: {
-        labelText: (d) => d.data.label,
-        labelBackground: '#fff',
-        endArrow: true,
-      },
-    },
-    behaviors: ['drag-element', 'zoom-canvas', 'drag-canvas'],
-  });
-
-
-
-
-   // 删除所有现有的事件监听，只保留这一个,,,后期上边注释了又添加的
-   graphInstance = new Graph({
     container: container.value,
     width: container.value.offsetWidth,
     height: container.value.offsetHeight,
@@ -1207,11 +1185,10 @@ const initGraph = () => {
       }
     }
   });
-
-  window.addEventListener('resize', randerGraph);
 }
 
 onMounted(() => {
+  window.addEventListener('resize', randerGraph);
   fetchFileList();
   fetchDownloadableFiles();
   loadGraphInfo();
@@ -1223,7 +1200,13 @@ onMounted(() => {
 onBeforeUnmount(() => {
   // 清理所有轮询定时器，防止泄漏
   graphJobStore.dispose();
+  clearTimeout(graphLoadRenderTimer);
+  graphLoadRenderTimer = null;
   window.removeEventListener('resize', randerGraph);
+  if (graphInstance) {
+    graphInstance.destroy();
+    graphInstance = null;
+  }
 });
 
 

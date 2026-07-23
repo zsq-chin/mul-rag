@@ -46,6 +46,7 @@
       <MdPreview v-else-if="message.content" ref="editorRef"
         :editorId="editorId"
         previewTheme="github"
+        :theme="themeStore.mode"
         :showCodeRowNumber="false"
         :modelValue="message.content"
         :key="message.id"
@@ -93,10 +94,13 @@
 import { computed, ref, useId } from 'vue';
 import { CaretRightOutlined } from '@ant-design/icons-vue';
 import RefsComponent from '@/components/RefsComponent.vue'
+import { useThemeStore } from '@/stores/theme'
 
 
 import { MdPreview } from 'md-editor-v3'
 import 'md-editor-v3/lib/preview.css';
+
+const themeStore = useThemeStore()
 
 const props = defineProps({
   // 消息角色：'user'|'assistant'|'sent'|'received'
@@ -453,8 +457,21 @@ const isEmptyAndLoading = computed(() => {
 </style>
 
 <style lang="less">
+.message-md.md-editor {
+  --md-bk-color: transparent;
+  --md-color: var(--text-primary);
+  background-color: transparent;
+  color: var(--text-primary);
+}
+
+.message-md .md-editor-preview {
+  --md-theme-color: var(--text-primary);
+  color: var(--text-primary);
+}
+
 .message-md .md-editor-preview-wrapper {
-  color: var(--gray-900);
+  --md-bk-color: transparent;
+  color: var(--text-primary);
   max-width: 100%;
   padding: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans SC', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', 'Hiragino Sans GB', 'Source Han Sans CN', 'Courier New', monospace;
