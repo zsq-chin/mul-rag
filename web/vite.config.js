@@ -21,7 +21,7 @@ export default defineConfig(({ mode }) => {
       },
       watch: {
         usePolling: true,
-        ignored: ['**/node_modules/**', '**/dist/**'],
+        ignored: ['**/node_modules/**', '**/dist/**', '**/.pnpm-store/**'],
       },
       host: '0.0.0.0',
       allowedHosts: ['chat.cup.edu.cn'],
