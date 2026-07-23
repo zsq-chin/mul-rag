@@ -3,10 +3,10 @@ services:
     image: mysql:8.0
     container_name: mysql
     environment:
-      MYSQL_ROOT_PASSWORD: CUPer123456
-      MYSQL_DATABASE: test
-      MYSQL_USER: app_user
-      MYSQL_PASSWORD: app_password
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-test}
+      MYSQL_USER: ${MYSQL_USER:-app_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
     volumes:
       - ./docker/volumes/mysql/data:/var/lib/mysql
       - ./docker/volumes/mysql/init:/docker-entrypoint-initdb.d  # 初始化脚本目录
@@ -58,8 +58,13 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - NEO4J_URI=bolt://graph:7687
-      - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-0123456789}
+      - NEO4J_USERNAME=${NEO4J_USERNAME:?Set NEO4J_USERNAME in .env}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env}
+      - MYSQL_HOST=${MYSQL_HOST:-mysql}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-test}
+      - MYSQL_USER=${MYSQL_USER:-app_user}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
       - MILVUS_URI=http://milvus:19530
       - MINERU_OCR_URI=http://mineru-api:5051
       - MODEL_DIR=/models
@@ -68,12 +73,37 @@ services:
       - MULTIMODAL_KB_DEFAULT_KB_ID=${MULTIMODAL_KB_DEFAULT_KB_ID:-}
       - MULTIMODAL_KB_TIMEOUT=${MULTIMODAL_KB_TIMEOUT:-30}
       - MULTIMODAL_KB_TOP_K=${MULTIMODAL_KB_TOP_K:-5}
-      - MODEL_CREDENTIAL_MASTER_KEY=${MODEL_CREDENTIAL_MASTER_KEY:-}
+      - MODEL_CREDENTIAL_MASTER_KEY=${MODEL_CREDENTIAL_MASTER_KEY:?Set MODEL_CREDENTIAL_MASTER_KEY in .env}
       - USER_MODEL_ALLOWED_HOSTS=${USER_MODEL_ALLOWED_HOSTS:-}
       - USER_MODEL_ALLOW_HTTP=${USER_MODEL_ALLOW_HTTP:-false}
-      - GRAPH_INTERNAL_TOKEN=${GRAPH_INTERNAL_TOKEN:-}
+      - GRAPH_INTERNAL_TOKEN=${GRAPH_INTERNAL_TOKEN:?Set GRAPH_INTERNAL_TOKEN in .env}
       - GRAPH_GROUND_IMPORT_ROOT=/app/indexing/ground_graph_fill
       - GRAPH_DRILL_IMPORT_ROOT=/app/indexing_drill/drill_graph_fill
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      - BOCHA_API_KEY=${BOCHA_API_KEY:-}
+      - BLOCKING_WORKERS=${BLOCKING_WORKERS:-8}
+      - CHAT_CONCURRENCY=${CHAT_CONCURRENCY:-2}
+      - RETRIEVAL_CONCURRENCY=${RETRIEVAL_CONCURRENCY:-4}
+      - GRAPH_IMPORT_CONCURRENCY=${GRAPH_IMPORT_CONCURRENCY:-1}
+      - UPSTREAM_PROXY_CONCURRENCY=${UPSTREAM_PROXY_CONCURRENCY:-16}
+      - CONCURRENCY_ACQUIRE_TIMEOUT=${CONCURRENCY_ACQUIRE_TIMEOUT:-30}
+      - MULTIMODAL_HTTP_CONNECT_TIMEOUT=${MULTIMODAL_HTTP_CONNECT_TIMEOUT:-10}
+      - MULTIMODAL_HTTP_READ_TIMEOUT=${MULTIMODAL_HTTP_READ_TIMEOUT:-600}
+      - MULTIMODAL_HTTP_WRITE_TIMEOUT=${MULTIMODAL_HTTP_WRITE_TIMEOUT:-60}
+      - MULTIMODAL_HTTP_POOL_TIMEOUT=${MULTIMODAL_HTTP_POOL_TIMEOUT:-10}
+      - MULTIMODAL_HTTP_MAX_CONNECTIONS=${MULTIMODAL_HTTP_MAX_CONNECTIONS:-40}
+      - MULTIMODAL_HTTP_MAX_KEEPALIVE=${MULTIMODAL_HTTP_MAX_KEEPALIVE:-20}
+      - MULTIMODAL_HTTP_KEEPALIVE_EXPIRY=${MULTIMODAL_HTTP_KEEPALIVE_EXPIRY:-30}
+      - GRAPH_WORKER_URL=${GRAPH_WORKER_URL:-http://graphrag-worker:8111}
+      - GRAPH_WORKER_CONNECT_TIMEOUT=${GRAPH_WORKER_CONNECT_TIMEOUT:-5}
+      - GRAPH_WORKER_READ_TIMEOUT=${GRAPH_WORKER_READ_TIMEOUT:-30}
+      - GRAPH_WORKER_WRITE_TIMEOUT=${GRAPH_WORKER_WRITE_TIMEOUT:-10}
+      - GRAPH_WORKER_POOL_TIMEOUT=${GRAPH_WORKER_POOL_TIMEOUT:-5}
+      - GRAPH_WORKER_MAX_CONNECTIONS=${GRAPH_WORKER_MAX_CONNECTIONS:-10}
+      - GRAPH_WORKER_MAX_KEEPALIVE=${GRAPH_WORKER_MAX_KEEPALIVE:-5}
+      - TIANSHU_API_BASE=${TIANSHU_API_BASE:-http://tianshu-backend:8000/api/v1}
+      - TIANSHU_CONNECT_TIMEOUT=${TIANSHU_CONNECT_TIMEOUT:-10}
+      - TIANSHU_READ_TIMEOUT=${TIANSHU_READ_TIMEOUT:-60}
     depends_on:
       mysql:
         condition: service_healthy
@@ -113,7 +143,7 @@ services:
       - ./docker/volumes/neo4j/data:/data
       - ./docker/volumes/neo4j/logs:/var/lib/neo4j/logs
     environment:
-      - NEO4J_AUTH=${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-0123456789}
+      - NEO4J_AUTH=${NEO4J_USERNAME:?Set NEO4J_USERNAME}/${NEO4J_PASSWORD:?Set NEO4J_PASSWORD}
       - NEO4J_server_bolt_listen__address=0.0.0.0:7687
       - NEO4J_server_http_listen__address=0.0.0.0:7474
       - ENTITY_EMBEDDING=true
@@ -146,8 +176,8 @@ services:
     container_name: milvus-minio
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     environment:
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in .env}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in .env}
     volumes:
       - ./docker/volumes/milvus/minio:/minio_data
     command: minio server /minio_data
@@ -234,7 +264,7 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - LOG_LEVEL=INFO
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-defaultkey}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
       - WORKER_URL=http://tianshu-worker:8001
       - DATABASE_PATH=/app/data/db/mineru_tianshu.db
     networks:
@@ -267,7 +297,7 @@ services:
       - PORT=8001
       - LOG_LEVEL=INFO
       - DATABASE_PATH=/app/data/db/mineru_tianshu.db
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-defaultkey}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
       - HF_ENDPOINT=https://hf-mirror.com
     networks:
       - app-network
@@ -290,7 +320,7 @@ services:
       - "8111"
     environment:
       - GRAPH_JOB_DB=/app/jobs/jobs.db
-      - GRAPH_INTERNAL_TOKEN=${GRAPH_INTERNAL_TOKEN:-}
+      - GRAPH_INTERNAL_TOKEN=${GRAPH_INTERNAL_TOKEN:?Set GRAPH_INTERNAL_TOKEN in .env}
       - MAIN_API_INTERNAL_URL=http://api:5050/api/data/graph/internal/import
       - GRAPH_IMPORT_TIMEOUT=${GRAPH_IMPORT_TIMEOUT:-1800}
     healthcheck:

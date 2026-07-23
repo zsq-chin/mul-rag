@@ -1,5 +1,7 @@
 import os
-import uvicorn
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, Request, HTTPException, status, Depends
@@ -8,8 +10,13 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from server.routers import router
-from server.services.http_clients import multimodal_client_lifespan
+from server.services.http_clients import (
+    close_multimodal_client,
+    close_graph_worker_client,
+    close_tianshu_client,
+)
 from server.utils.auth_middleware import is_public_path
+from src import shutdown_runtime
 from src.utils.logging_config import logger
 
 # 加载环境变量
@@ -18,7 +25,25 @@ load_dotenv(env_path)
 logger.info(f"加载环境变量文件: {env_path}")
 
 
-app = FastAPI(lifespan=multimodal_client_lifespan)
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Manage application startup and shutdown."""
+    try:
+        yield
+    finally:
+        try:
+            await close_multimodal_client()
+        finally:
+            try:
+                await close_graph_worker_client()
+            finally:
+                try:
+                    await close_tianshu_client()
+                finally:
+                    shutdown_runtime()
+
+
+app = FastAPI(lifespan=app_lifespan)
 app.include_router(router, prefix="/api")
 
 # CORS 设置
@@ -64,6 +89,3 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 # 添加鉴权中间件
 #app.add_middleware(AuthMiddleware)
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=5050, threads=10, workers=10, reload=True)

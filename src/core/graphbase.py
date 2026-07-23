@@ -42,8 +42,16 @@ class GraphDatabase:
             return
 
         uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-        username = os.environ.get("NEO4J_USERNAME", "neo4j")
-        password = os.environ.get("NEO4J_PASSWORD", "0123456789")
+        username = os.environ.get("NEO4J_USERNAME")
+        password = os.environ.get("NEO4J_PASSWORD")
+        if not username or not password:
+            logger.error(
+                "Neo4j credentials not configured; "
+                "set NEO4J_USERNAME and NEO4J_PASSWORD environment variables"
+            )
+            self.status = "closed"
+            config.enable_knowledge_graph = False
+            return
         logger.info(f"Connecting to Neo4j: {uri}/{self.kgdb_name}")
         try:
             self.driver = GD.driver(f"{uri}/{self.kgdb_name}", auth=(username, password))

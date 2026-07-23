@@ -87,6 +87,41 @@ async def close_graph_worker_client() -> None:
     _graph_worker_client = None
 
 
+_tianshu_client: httpx.AsyncClient | None = None
+
+TIANSHU_API_BASE = os.getenv("TIANSHU_API_BASE", "http://tianshu-backend:8000/api/v1")
+
+
+def get_tianshu_client() -> httpx.AsyncClient:
+    """Return a dedicated async client for the Tianshu backend."""
+    global _tianshu_client
+    if _tianshu_client is None or _tianshu_client.is_closed:
+        timeout = httpx.Timeout(
+            connect=_env_float("TIANSHU_CONNECT_TIMEOUT", 10.0),
+            read=_env_float("TIANSHU_READ_TIMEOUT", 60.0),
+            write=10.0,
+            pool=5.0,
+        )
+        limits = httpx.Limits(
+            max_connections=10,
+            max_keepalive_connections=5,
+        )
+        _tianshu_client = httpx.AsyncClient(
+            base_url=TIANSHU_API_BASE,
+            timeout=timeout,
+            limits=limits,
+            follow_redirects=False,
+        )
+    return _tianshu_client
+
+
+async def close_tianshu_client() -> None:
+    global _tianshu_client
+    if _tianshu_client is not None and not _tianshu_client.is_closed:
+        await _tianshu_client.aclose()
+    _tianshu_client = None
+
+
 @asynccontextmanager
 async def multimodal_client_lifespan(_app: Any) -> AsyncIterator[None]:
     try:
@@ -94,3 +129,4 @@ async def multimodal_client_lifespan(_app: Any) -> AsyncIterator[None]:
     finally:
         await close_multimodal_client()
         await close_graph_worker_client()
+        await close_tianshu_client()

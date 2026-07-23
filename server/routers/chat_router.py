@@ -1,9 +1,9 @@
 import os
 import json
 import asyncio
+import functools
 import traceback
 import uuid
-import time
 from datetime import datetime # [新增] 导入 datetime
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessageChunk, HumanMessage
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import httpx
-from starlette.background import BackgroundTask
+from server.services.concurrency import chat_gate, retrieval_gate, upstream_proxy_gate
 
 from src import executor, config, retriever
 from src.core import HistoryManager
@@ -41,14 +41,15 @@ chat = APIRouter(prefix="/chat")
 
 @chat.get("/multimodal/kbs")
 async def get_multimodal_kbs(current_user: User = Depends(get_required_user)):
-    base_url = get_multimodal_api_base()
-    try:
-        resp = await get_multimodal_client().get(f"{base_url}/kb/list")
-        resp.raise_for_status()
-        payload = resp.json()
-    except (httpx.HTTPError, ValueError) as e:
-        logger.error(f"Multimodal kb list proxy error: {e}, {traceback.format_exc()}")
-        raise HTTPException(status_code=502, detail=f"澶氭ā鎬佺煡璇嗗簱鍒楄〃鍔犺浇澶辫触: {e}")
+    async with upstream_proxy_gate:
+        base_url = get_multimodal_api_base()
+        try:
+            resp = await get_multimodal_client().get(f"{base_url}/kb/list")
+            resp.raise_for_status()
+            payload = resp.json()
+        except (httpx.HTTPError, ValueError) as e:
+            logger.error(f"Multimodal kb list proxy error: {e}, {traceback.format_exc()}")
+            raise HTTPException(status_code=502, detail=f"澶氭ā鎬佺煡璇嗗簱鍒楄〃鍔犺浇澶辫触: {e}")
 
     return {
         "kbs": normalize_multimodal_kbs(payload),
@@ -68,6 +69,7 @@ async def get_multimodal_image(
     if not safe_image_path:
         raise HTTPException(status_code=400, detail="图片路径无效")
 
+    await upstream_proxy_gate.__aenter__()
     try:
         client = get_multimodal_client()
         upstream_request = client.build_request(
@@ -76,16 +78,29 @@ async def get_multimodal_image(
             params={"kbId": kbId, "fileId": fileId, "imagePath": safe_image_path},
         )
         resp = await client.send(upstream_request, stream=True)
-    except httpx.HTTPError as e:
+    except asyncio.CancelledError:
+        await upstream_proxy_gate.__aexit__(None, None, None)
+        raise
+    except Exception as e:
+        await upstream_proxy_gate.__aexit__(type(e), e, e.__traceback__)
         logger.error(f"Multimodal image proxy error: {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=502, detail=f"多模态图片加载失败: {e}")
 
+    async def _stream():
+        try:
+            async for chunk in resp.aiter_bytes(chunk_size=1024 * 64):
+                yield chunk
+        finally:
+            try:
+                await resp.aclose()
+            finally:
+                await upstream_proxy_gate.__aexit__(None, None, None)
+
     return StreamingResponse(
-        resp.aiter_bytes(chunk_size=1024 * 64),
+        _stream(),
         status_code=resp.status_code,
         media_type=resp.headers.get("content-type", "image/png"),
         headers={"Cache-Control": resp.headers.get("cache-control", "private, max-age=3600")},
-        background=BackgroundTask(resp.aclose),
     )
 
 
@@ -97,13 +112,13 @@ async def process_question_stats(raw_query: str):
         return
 
     logger.info(f"开始后台统计任务: {raw_query[:20]}...")
-    
+
     # --- 第一步：LLM 归一化 (提取核心问题) ---
     standard_title = raw_query
     try:
         # 获取模型 (可以使用默认模型，也可以指定更快的模型)
-        model = select_model() 
-        
+        model = select_model()
+
         # 构造提示词，要求模型只输出核心问题
         prompt = (
             f"请将以下用户的提问概括为一个简短、标准的问答库标题。\n"
@@ -115,25 +130,27 @@ async def process_question_stats(raw_query: str):
             f"用户提问：{raw_query}\n"
             f"标准标题："
         )
-        
+
         # 调用模型 (使用 executor 在线程池中运行，避免阻塞事件循环)
-        # 注意：这里复用项目中已有的 executor
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(executor, model.predict, prompt)
-        
+        loop = asyncio.get_running_loop()
+        async with chat_gate:
+            response = await loop.run_in_executor(
+                executor, functools.partial(model.predict, prompt)
+            )
+
         # 处理响应内容
         if hasattr(response, 'content'):
             llm_title = response.content.strip()
         else:
             llm_title = str(response).strip()
-            
+
         # 简单清洗：去除可能的引号等
         llm_title = llm_title.replace('"', '').replace('“', '').replace('”', '').replace('。', '')
-        
+
         if llm_title:
             standard_title = llm_title
             logger.info(f"问题归一化: '{raw_query}' -> '{standard_title}'")
-            
+
     except Exception as e:
         logger.error(f"LLM 归一化失败，将使用原始问题: {e}")
         # 失败时回退到原始问题，截取前50字符防止过长
@@ -144,13 +161,13 @@ async def process_question_stats(raw_query: str):
     try:
         # **重要**：后台任务必须创建自己的 DB 会话，不能复用请求的 session
         session = db_manager.get_session()
-        
+
         # 截取长度以符合数据库字段限制 (假设 title 为 VARCHAR(255))
         db_title = standard_title[:255]
-        
+
         # 查询是否存在
         question_entry = session.query(Question).filter(Question.title == db_title).first()
-        
+
         if question_entry:
             # 更新计数
             question_entry.count += 1
@@ -167,9 +184,9 @@ async def process_question_stats(raw_query: str):
             )
             session.add(new_question)
             logger.info(f"统计新增: 收录新问题 '{db_title}'")
-        
+
         session.commit()
-        
+
     except Exception as e:
         logger.error(f"统计数据写入失败: {e}")
         if session:
@@ -290,17 +307,49 @@ async def chat_post(
     def need_retrieve(meta):
         return meta.get("use_web") or meta.get("use_graph") or meta.get("db_id") or meta.get("use_multimodal_kb")
 
-    def generate_response():
+    # Sentinel for safe sync-iterator exhaustion (StopIteration cannot
+    # propagate through a Future, so the executor thread signals via a
+    # sentinel tuple instead).
+    _STREAM_DONE = object()
+
+    async def _aiter_sync_stream(sync_iter, loop):
+        """Advance a synchronous streaming iterator in the executor.
+
+        Each call to ``next()`` happens in *loop*'s default executor so
+        that a blocking model backend never starves the event loop.
+        ``StopIteration`` is caught inside the thread and translated to
+        the ``_STREAM_DONE`` sentinel so that it never escapes a
+        ``Future`` (which would silently corrupt the coroutine chain).
+        """
+        def _next_or_sentinel():
+            try:
+                return next(sync_iter)
+            except StopIteration:
+                return _STREAM_DONE
+
+        while True:
+            delta = await loop.run_in_executor(executor, _next_or_sentinel)
+            if delta is _STREAM_DONE:
+                return
+            yield delta
+
+    async def generate_response():
         modified_query = query
         refs = None
 
         # 处理知识库检索
         if meta and need_retrieve(meta):
-            chunk = make_chunk(status="searching")
-            yield chunk
+            yield make_chunk(status="searching")
 
             try:
-                modified_query, refs = retriever(modified_query, history_manager.messages, meta)
+                loop = asyncio.get_running_loop()
+                async with retrieval_gate:
+                    modified_query, refs = await loop.run_in_executor(
+                        executor,
+                        functools.partial(
+                            retriever, modified_query, history_manager.messages, meta
+                        ),
+                    )
             except Exception as e:
                 logger.error(f"Retriever error: {e}, {traceback.format_exc()}")
                 yield make_chunk(message=f"Retriever error: {e}", status="error")
@@ -314,7 +363,12 @@ async def chat_post(
         content = ""
         reasoning_content = ""
         try:
-            for delta in model.predict(messages, stream=True):
+            loop = asyncio.get_running_loop()
+            sync_iter = await loop.run_in_executor(
+                executor,
+                functools.partial(model.predict, messages, stream=True),
+            )
+            async for delta in _aiter_sync_stream(sync_iter, loop):
                 # 推理模型才会有reasoning_content属性
                 if not delta.content and hasattr(delta, 'reasoning_content'):
                     reasoning_content += delta.reasoning_content or ""
@@ -336,22 +390,24 @@ async def chat_post(
             related_questions = []
             try:
                 # 只有当回答内容足够长时才生成推荐
-                if len(content) > 10: 
+                if len(content) > 10:
                     # 构造推荐问题的 Prompt
                     recommend_prompt = f"""基于用户的提问和你的回答，请生成3个用户可能感兴趣的后续简短问题。
                     用户提问: {query}
                     你的回答: {content[:500]}... (摘要)
-                    
+
                     要求：
                     1. 只返回问题列表，每行一个。
                     2. 问题简短有力，不要带序号。
                     3. 不要包含"可以问"、"例如"等废话。
                     """
-                    
+
                     # 使用非流式调用快速获取
-                    # 注意：这里复用了上面的 model 对象，确保能够调用
-                    rec_response = model.predict(recommend_prompt) 
-                    
+                    rec_response = await loop.run_in_executor(
+                        executor,
+                        functools.partial(model.predict, recommend_prompt),
+                    )
+
                     # 兼容不同的模型返回格式
                     rec_text = rec_response.content if hasattr(rec_response, 'content') else str(rec_response)
                     related_questions = parse_related_questions(rec_text)
@@ -360,21 +416,31 @@ async def chat_post(
                 logger.error(f"生成推荐问题失败: {e}")
                 # 失败不影响主要流程，只是没有推荐问题
                 pass
-            
+
             # === 修改结束：将 related_questions 加入到 finished 块中 ===
 
             yield make_chunk(status="finished",
                             history=history_manager.update_ai(content),
                             refs=refs,
                             related_questions=related_questions) # <--- 添加这一行
-                            
+
         except Exception as e:
             # ... 异常处理保持不变 ...
             logger.error(f"Model error: {e}, {traceback.format_exc()}")
             yield make_chunk(message=f"Model error: {e}", status="error")
             return
 
-    return StreamingResponse(generate_response(), media_type='application/json')
+    await chat_gate.__aenter__()
+
+    async def _stream_with_gate():
+        try:
+            async for chunk in generate_response():
+                yield chunk
+        finally:
+            await chat_gate.__aexit__(None, None, None)
+
+    return StreamingResponse(_stream_with_gate(), media_type='application/json')
+
 @chat.post("/call")
 async def call(
         query: str = Body(...),
@@ -386,11 +452,13 @@ async def call(
     meta = meta or {}
     assert_chat_features_allowed(current_user, meta)
     model = resolve_model_for_user(db, current_user, meta)
-    async def predict_async(query):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(executor, model.predict, query)
 
-    response = await predict_async(query)
+    loop = asyncio.get_running_loop()
+    async with chat_gate:
+        response = await loop.run_in_executor(
+            executor, functools.partial(model.predict, query)
+        )
+
     logger.debug({"query": query, "response": response.content})
 
     return {"response": response.content}
@@ -470,13 +538,27 @@ async def chat_agent(agent_name: str,
             logger.error(f"Error streaming messages: {e}, {traceback.format_exc()}")
             yield make_chunk(message=f"Error streaming messages: {e}", status="error")
 
-    return StreamingResponse(stream_messages(), media_type='application/json')
+    await chat_gate.__aenter__()
+
+    async def _stream_with_gate():
+        try:
+            async for chunk in stream_messages():
+                yield chunk
+        finally:
+            await chat_gate.__aexit__(None, None, None)
+
+    return StreamingResponse(_stream_with_gate(), media_type='application/json')
 
 @chat.get("/models")
 async def get_chat_models(model_provider: str, current_user: User = Depends(get_superadmin_user)):
     """获取指定模型提供商的模型列表（需要登录）"""
     model = select_model(model_provider=model_provider)
-    return {"models": model.get_models()}
+    loop = asyncio.get_running_loop()
+    async with chat_gate:
+        models = await loop.run_in_executor(
+            executor, functools.partial(model.get_models)
+        )
+    return {"models": models}
 
 @chat.post("/models/update")
 async def update_chat_models(model_provider: str, model_names: list[str], current_user = Depends(get_superadmin_user)):

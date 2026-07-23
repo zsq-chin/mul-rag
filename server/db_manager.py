@@ -21,7 +21,27 @@ class DBManager:
         self.ensure_db_dir()
 
         # 创建SQLAlchemy引擎
-        self.engine = create_engine(f"sqlite:///{self.db_path}")
+        self.engine = create_engine(
+            f"sqlite:///{self.db_path}",
+            connect_args={
+                "timeout": 30,
+                "check_same_thread": False,
+            },
+            pool_pre_ping=True,
+        )
+
+        # Set SQLite pragmas on every new connection
+        from sqlalchemy import event
+
+        @event.listens_for(self.engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+                cursor.execute("PRAGMA foreign_keys=ON")
+            finally:
+                cursor.close()
 
         # 创建会话工厂
         self.Session = sessionmaker(bind=self.engine)

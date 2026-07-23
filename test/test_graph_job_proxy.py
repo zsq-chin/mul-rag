@@ -44,13 +44,25 @@ _PKG.__path__ = [_SERVER_ROOT]
 sys.modules["_test_proxy_data_router"] = _PKG
 
 # Stub heavy transitive deps that data_router pulls in via ``from src import ...``
-for _mod_name in [
+# Save every entry first so the finally block can restore them exactly, preventing
+# MagicMock 'src' from leaking into later test modules (e.g. test_concurrency).
+_STUB_NAMES = [
     'src', 'src.utils', 'src.utils.logging_config', 'src.utils.logger',
     'src.executor', 'src.retriever', 'src.config', 'src.knowledge_base',
     'src.graph_base', 'src.core', 'src.core.graphbase',
     'src.agents', 'src.agents.react',
     'langchain_core', 'langchain_core.messages',
-]:
+]
+# Use a unique sentinel so we can distinguish "key was absent" from
+# "key existed with value None" (both are valid sys.modules states).
+_ABSENT = object()
+_saved_stubs = {}
+for _name in _STUB_NAMES:
+    if _name in sys.modules:
+        _saved_stubs[_name] = sys.modules[_name]  # preserves None values
+    else:
+        _saved_stubs[_name] = _ABSENT
+for _mod_name in _STUB_NAMES:
     if _mod_name not in sys.modules:
         sys.modules[_mod_name] = MagicMock()
 
@@ -125,6 +137,14 @@ finally:
         sys.modules["server.routers"] = _real_routers
     else:
         sys.modules.pop("server.routers", None)
+    # Restore every stub we inserted so downstream test modules see
+    # the real packages (or absence) rather than stale MagicMock objects.
+    for _mod_name in _STUB_NAMES:
+        _prev = _saved_stubs[_mod_name]
+        if _prev is _ABSENT:
+            sys.modules.pop(_mod_name, None)
+        else:
+            sys.modules[_mod_name] = _prev  # restores even when _prev is None
 
 data = _data_router_mod.data
 _proxy_graph_worker = _data_router_mod._proxy_graph_worker
@@ -529,6 +549,36 @@ class GraphJobProxySuccessTests(unittest.TestCase):
         resp = self.client.post(f"/data/graph/jobs/{VALID_TASK_ID}/retry")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["status"], "queued")
+
+
+# ---------------------------------------------------------------------------
+# Isolation regression test
+# ---------------------------------------------------------------------------
+
+
+class GraphJobProxyIsolationTests(unittest.TestCase):
+    """Verify this test module does not leak MagicMock stubs into sys.modules."""
+
+    def test_no_mock_stubs_leaked_in_sys_modules(self):
+        """Regression: the isolated loader must restore every sys.modules entry
+        it touched.  Downstream tests that import src.* (e.g.
+        test_concurrency -> server.services.concurrency -> src) would fail with
+        ModuleNotFoundError: No module named 'src.agents'; 'src' is not a package.
+
+        This test directly asserts restoration behavior by checking every name
+        the stub list installed, without depending on unrelated later imports.
+        """
+        for _name in _STUB_NAMES:
+            _mod = sys.modules.get(_name)
+            if _mod is None:
+                # Entry is absent or explicitly None -- neither is a MagicMock leak.
+                continue
+            self.assertNotIsInstance(
+                _mod,
+                MagicMock,
+                f"sys.modules['{_name}'] is a MagicMock -- the isolated loader "
+                f"leaked a stub. Downstream tests importing {_name}.* will break.",
+            )
 
 
 if __name__ == "__main__":

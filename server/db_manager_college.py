@@ -1,6 +1,7 @@
 import os
 import pathlib
 from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
 
@@ -14,8 +15,20 @@ class DBManagerCollege:
 
     def __init__(self):
 
-        # 创建SQLAlchemy引擎
-        DATABASE_URL = "mysql+pymysql://root:CUPer123456@mysql:3306/test"
+        # 创建SQLAlchemy引擎 — credentials from environment only
+        password = os.environ.get("MYSQL_PASSWORD")
+        if not password:
+            raise RuntimeError(
+                "MYSQL_PASSWORD environment variable is required but not set"
+            )
+        DATABASE_URL = URL.create(
+            "mysql+pymysql",
+            username=os.environ.get("MYSQL_USER", "app_user"),
+            password=password,
+            host=os.environ.get("MYSQL_HOST", "mysql"),
+            port=int(os.environ.get("MYSQL_PORT", "3306")),
+            database=os.environ.get("MYSQL_DATABASE", "test"),
+        )
         self.engine = create_engine(DATABASE_URL, echo=True)
 
         # 创建会话工厂

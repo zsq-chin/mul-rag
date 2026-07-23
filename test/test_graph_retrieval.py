@@ -35,6 +35,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Sentinel values that must NOT appear as hardcoded defaults in production code.
+FORBIDDEN_SECRETS = ["CUPer123456", "0123456789", "defaultkey", "app_password", "minioadmin"]
+
 # -- tiny stubs for heavy transitive dependencies --------------------------
 
 _stub_torch = types.ModuleType("torch")
@@ -150,14 +153,24 @@ def _register_stub(name, mod):
 
 
 def _restore_modules():
-    """Restore original module state."""
+    """Restore original module state.
+
+    Every name in ``_stub_names`` is either restored to its pre-existing
+    value or removed entirely -- including entries like ``torch``,
+    ``neo4j``, ``chardet``, and ``requests`` that do *not* start with
+    ``src`` or ``server``.  Side-effect ``src``/``server`` sub-module
+    imports are also cleaned up.
+    """
+    # 1. Remove side-effect imports of src/server submodules.
     for name in list(sys.modules):
         if name not in _saved_modules and name.startswith(("src", "server")):
-            # Remove stubs we added that weren't there before
-            if name not in _saved_modules:
-                del sys.modules[name]
-    for name, mod in _saved_modules.items():
-        sys.modules[name] = mod
+            del sys.modules[name]
+    # 2. Restore or remove every name we explicitly stubbed.
+    for name in _stub_names:
+        if name in _saved_modules:
+            sys.modules[name] = _saved_modules[name]
+        else:
+            sys.modules.pop(name, None)
 
 
 _retriever_path = _PROJECT_ROOT / "src" / "core" / "retriever.py"
@@ -846,7 +859,11 @@ class TestGraphStartGate(unittest.TestCase):
         gdb.kgdb_name = "neo4j"
         gdb.embed_model_name = None
         gdb.work_dir = "/tmp/test_sage/knowledge_graph/neo4j"
-        gdb.start()
+        with patch.dict(os.environ, {
+            "NEO4J_USERNAME": "neo4j",
+            "NEO4J_PASSWORD": "test_pw",
+        }):
+            gdb.start()
 
         mock_gd.driver.assert_called_once()
         self.assertEqual(gdb.status, "open")
@@ -899,6 +916,122 @@ class TestGraphStartGate(unittest.TestCase):
             for value in call.args
         )
         self.assertNotIn("0123456789", logged)
+
+    def test_start_skips_driver_when_username_missing(self):
+        """start() must not call GD.driver when NEO4J_USERNAME is absent."""
+        cfg = _StubConfig({
+            "enable_knowledge_graph": True,
+            "enable_knowledge_base": False,
+        })
+        mock_gd = MagicMock()
+        mock_logger = MagicMock()
+        _graphbase_mod.config = cfg
+        _graphbase_mod.GD = mock_gd
+        _graphbase_mod.logger = mock_logger
+
+        gdb = GraphDatabase.__new__(GraphDatabase)
+        gdb.driver = None
+        gdb.files = []
+        gdb.status = "closed"
+        gdb.kgdb_name = "neo4j"
+        gdb.embed_model_name = None
+        gdb.work_dir = "/tmp/test_sage/knowledge_graph/neo4j"
+        env = {"NEO4J_PASSWORD": "pw123"}
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("NEO4J_USERNAME", "NEO4J_PASSWORD")}
+        clean.update(env)
+        with patch.dict(os.environ, clean, clear=True):
+            gdb.start()
+        mock_gd.driver.assert_not_called()
+        self.assertEqual(gdb.status, "closed")
+
+    def test_start_skips_driver_when_password_missing(self):
+        """start() must not call GD.driver when NEO4J_PASSWORD is absent."""
+        cfg = _StubConfig({
+            "enable_knowledge_graph": True,
+            "enable_knowledge_base": False,
+        })
+        mock_gd = MagicMock()
+        mock_logger = MagicMock()
+        _graphbase_mod.config = cfg
+        _graphbase_mod.GD = mock_gd
+        _graphbase_mod.logger = mock_logger
+
+        gdb = GraphDatabase.__new__(GraphDatabase)
+        gdb.driver = None
+        gdb.files = []
+        gdb.status = "closed"
+        gdb.kgdb_name = "neo4j"
+        gdb.embed_model_name = None
+        gdb.work_dir = "/tmp/test_sage/knowledge_graph/neo4j"
+        env = {"NEO4J_USERNAME": "neo4j"}
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("NEO4J_USERNAME", "NEO4J_PASSWORD")}
+        clean.update(env)
+        with patch.dict(os.environ, clean, clear=True):
+            gdb.start()
+        mock_gd.driver.assert_not_called()
+        self.assertEqual(gdb.status, "closed")
+
+    def test_start_skips_driver_when_both_missing(self):
+        """start() must not call GD.driver when both creds are absent."""
+        cfg = _StubConfig({
+            "enable_knowledge_graph": True,
+            "enable_knowledge_base": False,
+        })
+        mock_gd = MagicMock()
+        mock_logger = MagicMock()
+        _graphbase_mod.config = cfg
+        _graphbase_mod.GD = mock_gd
+        _graphbase_mod.logger = mock_logger
+
+        gdb = GraphDatabase.__new__(GraphDatabase)
+        gdb.driver = None
+        gdb.files = []
+        gdb.status = "closed"
+        gdb.kgdb_name = "neo4j"
+        gdb.embed_model_name = None
+        gdb.work_dir = "/tmp/test_sage/knowledge_graph/neo4j"
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("NEO4J_USERNAME", "NEO4J_PASSWORD")}
+        with patch.dict(os.environ, clean, clear=True):
+            gdb.start()
+        mock_gd.driver.assert_not_called()
+        self.assertEqual(gdb.status, "closed")
+
+    def test_missing_creds_log_excludes_secret_values(self):
+        """Error log on missing creds must not contain any credential value."""
+        cfg = _StubConfig({
+            "enable_knowledge_graph": True,
+            "enable_knowledge_base": False,
+        })
+        mock_gd = MagicMock()
+        mock_logger = MagicMock()
+        _graphbase_mod.config = cfg
+        _graphbase_mod.GD = mock_gd
+        _graphbase_mod.logger = mock_logger
+
+        gdb = GraphDatabase.__new__(GraphDatabase)
+        gdb.driver = None
+        gdb.files = []
+        gdb.status = "closed"
+        gdb.kgdb_name = "neo4j"
+        gdb.embed_model_name = None
+        gdb.work_dir = "/tmp/test_sage/knowledge_graph/neo4j"
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("NEO4J_USERNAME", "NEO4J_PASSWORD")}
+        with patch.dict(os.environ, clean, clear=True):
+            gdb.start()
+        all_log = " ".join(
+            str(a)
+            for call in (mock_logger.error.call_args_list +
+                         mock_logger.warning.call_args_list +
+                         mock_logger.info.call_args_list)
+            for a in call.args
+        )
+        for secret in FORBIDDEN_SECRETS:
+            self.assertNotIn(secret, all_log,
+                             f"Log output contains forbidden secret '{secret}'")
 
 
 class TestStructuredQueryNode(unittest.TestCase):
@@ -1217,6 +1350,32 @@ class TestStableIdsShared(unittest.TestCase):
         text = format_graph_context(ranked)
         for r in ranked:
             self.assertIn(f"[{r['ref_id']}]", text)
+
+
+# =========================================================================
+# 13. Module cleanup regression
+# =========================================================================
+
+
+class TestModuleCleanup(unittest.TestCase):
+    """Verify _restore_modules() removes all stubs, including non-src names."""
+
+    def test_torch_neo4j_chardet_requests_not_left_in_sys_modules(self):
+        """After _restore_modules(), fake torch/neo4j/chardet/requests
+        entries must not linger in sys.modules -- they pollute later tests."""
+        for name, stub in _stub_map.items():
+            if name.startswith(("src", "server")):
+                continue
+            actual = sys.modules.get(name)
+            if actual is None:
+                continue
+            # If the stub object we created is still the one in sys.modules,
+            # the cleanup failed.
+            self.assertIsNot(
+                actual,
+                stub,
+                f"{name!r} still references the test stub after _restore_modules()",
+            )
 
 
 if __name__ == "__main__":
