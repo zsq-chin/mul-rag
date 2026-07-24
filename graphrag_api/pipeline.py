@@ -249,7 +249,13 @@ class GraphPipeline:
                 continue
             if job_id is None:
                 break
-            self._run_job(job_id)
+            try:
+                self._run_job(job_id)
+            except Exception as exc:
+                # Safety net: an unexpected exception escaping _run_job
+                # must not leave the job in a non-terminal state.
+                # _fail_job swallows its own errors so this never raises.
+                self._fail_job(job_id, f"Unexpected worker error: {exc}")
 
     # -- job runner ---------------------------------------------------------
 
@@ -411,7 +417,6 @@ class GraphPipeline:
 
         log_buffer: List[str] = []
         current_progress = 10
-        stdout_eof = False
 
         # --- reader thread: drains stdout into a queue so the main loop
         #     is never blocked on readline (enables cancel on silent proc).
@@ -455,30 +460,56 @@ class GraphPipeline:
                 try:
                     line = line_queue.get(timeout=0.2)
                 except Empty:
-                    # No output in 200ms -- loop back and check cancel
-                    if stdout_eof:
-                        ret = proc.poll()
-                        if ret is not None:
-                            log_tail = "".join(log_buffer)
-                            if ret != 0:
-                                self._fail_job(
-                                    job_id,
-                                    f"Build process exited with code {ret}",
-                                    log_tail=log_tail,
-                                )
-                                return False
-                            self._store.transition(
+                    # No output in 200ms -- poll process liveness
+                    # independently of stdout EOF.  A child can exit
+                    # while the reader thread never delivers EOF (e.g.
+                    # pipe not fully closed), so gating poll() on EOF
+                    # would leave the job stuck forever.
+                    ret = proc.poll()
+                    if ret is not None:
+                        # Process exited.  The reader thread may have
+                        # read a final buffered line but not yet
+                        # enqueued it.  Give it a small, explicitly
+                        # bounded opportunity to finish, then drain
+                        # non-blockingly.
+                        reader_thread.join(timeout=0.05)
+                        # Drain any remaining queued
+                        # output without blocking, then return.
+                        while True:
+                            try:
+                                tail_line = line_queue.get_nowait()
+                            except Empty:
+                                break
+                            if tail_line == _EOF:
+                                break
+                            log_buffer.append(tail_line)
+                        joined = "".join(log_buffer)
+                        if len(joined.encode("utf-8")) > _LOG_TAIL_LIMIT:
+                            tail_bytes = joined.encode("utf-8")[
+                                -_LOG_TAIL_LIMIT:
+                            ]
+                            log_buffer = [
+                                tail_bytes.decode("utf-8", errors="replace")
+                            ]
+                        log_tail = "".join(log_buffer)
+                        if ret != 0:
+                            self._fail_job(
                                 job_id,
-                                "building",
-                                current_progress,
+                                f"Build process exited with code {ret}",
                                 log_tail=log_tail,
                             )
-                            return True
+                            return False
+                        self._store.transition(
+                            job_id,
+                            "building",
+                            current_progress,
+                            log_tail=log_tail,
+                        )
+                        return True
                     continue
 
                 if line == _EOF:
                     # stdout closed but process may still be running
-                    stdout_eof = True
                     continue
 
                 # Accumulate log line
@@ -518,10 +549,13 @@ class GraphPipeline:
             # try to terminate a process that has already exited.
             with self._active_proc_lock:
                 self._active_proc = None
-            # Bounded join on the reader thread -- after terminate/kill the
-            # readline should return EOF quickly, but we cap the wait to
-            # avoid hanging on a misbehaving stdio pipe.
-            reader_thread.join(timeout=5)
+            # Bounded join on the reader thread.  After terminate/kill
+            # the readline returns quickly so a short timeout suffices.
+            # A long timeout would stall the no-EOF exit path where
+            # the reader is permanently blocked on the pipe -- the
+            # poll-detected-exit path already did its own brief join
+            # and drain, so this is just a safety net.
+            reader_thread.join(timeout=0.1)
 
     # -- shutdown helper ----------------------------------------------------
 

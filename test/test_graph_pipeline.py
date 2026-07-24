@@ -68,11 +68,13 @@ class _FakeProcess:
         returncode: int = 0,
         blocks_forever: bool = False,
         eof_while_running: bool = False,
+        exited_without_eof: bool = False,
     ):
         self._lines = stdout_lines or []
         self._returncode = returncode
         self._blocks_forever = blocks_forever
         self._eof_while_running = eof_while_running
+        self._exited_without_eof = exited_without_eof
         self._line_idx = 0
         self._lock = threading.Lock()
         self._terminated = threading.Event()
@@ -90,6 +92,14 @@ class _FakeProcess:
         return self
 
     def poll(self) -> Optional[int]:
+        if self._exited_without_eof:
+            # Gate on buffered lines consumed: the reader thread must
+            # have read and enqueued every buffered line before we
+            # report exit, so the main loop processes them via the
+            # normal line_queue path rather than racing with drain.
+            if self._all_lines_read.is_set():
+                return self._returncode
+            return None
         if self._killed.is_set():
             return self._returncode
         if self._terminated.is_set() and not self._blocks_forever:
@@ -107,6 +117,23 @@ class _FakeProcess:
             return ""
         if self._eof_while_running:
             self._all_lines_read.set()
+            return ""
+        if self._exited_without_eof:
+            # Yield buffered lines, then block forever -- never
+            # deliver EOF.  This replicates the real failure where
+            # the child exits but readline() keeps blocking on the
+            # pipe because it was not fully closed.  poll() is the
+            # only way to detect the exit.
+            with self._lock:
+                if self._line_idx < len(self._lines):
+                    line = self._lines[self._line_idx]
+                    self._line_idx += 1
+                    if self._line_idx >= len(self._lines):
+                        self._all_lines_read.set()
+                    return line
+            # All buffered lines consumed -- signal then block.
+            self._all_lines_read.set()
+            self._read_event.wait(timeout=300)
             return ""
         with self._lock:
             if self._line_idx >= len(self._lines):
@@ -134,6 +161,11 @@ class _FakeProcess:
         # After kill, always return immediately.
         if self._killed.is_set():
             return self._returncode
+        # Process already exited (exited_without_eof): return at once.
+        # This path is reached after poll() detected exit and the
+        # pipeline called terminate/kill; wait() must not block.
+        if self._exited_without_eof:
+            return self._returncode
         # blocks_forever: after terminate, SIGTERM did not kill the process,
         # so raise TimeoutExpired to let the caller escalate to kill().
         if self._blocks_forever and self._terminated.is_set():
@@ -160,6 +192,7 @@ def _make_popen_factory(
     returncode: int = 0,
     blocks_forever: bool = False,
     eof_while_running: bool = False,
+    exited_without_eof: bool = False,
     captured: Optional[List["_FakeProcess"]] = None,
 ) -> Callable[..., Any]:
     """Return a Popen-factory callable that creates _FakeProcess instances.
@@ -174,6 +207,7 @@ def _make_popen_factory(
             returncode=returncode,
             blocks_forever=blocks_forever,
             eof_while_running=eof_while_running,
+            exited_without_eof=exited_without_eof,
         )
         if captured is not None:
             captured.append(proc)
@@ -476,10 +510,12 @@ class GraphPipelineTests(unittest.TestCase):
         p.start()
 
         job = p.submit("ground")
-        # Wait until we know the subprocess has been spawned (job is building+)
+        # Wait until the subprocess has actually been spawned:
+        # status must be "building" (past the copying stage) AND
+        # the fake process must exist in the captured list.
         for _ in range(200):
             rec = self.store.get(job.id)
-            if rec and rec.status in ("copying", "building"):
+            if rec and rec.status == "building" and len(fakes) > 0:
                 break
             time.sleep(0.05)
 
@@ -819,9 +855,10 @@ class GraphPipelineTests(unittest.TestCase):
         p.start()
 
         job = p.submit("ground")
+        # Wait until the subprocess has been spawned (building status).
         for _ in range(200):
             rec = self.store.get(job.id)
-            if rec and rec.status in ("copying", "building"):
+            if rec and rec.status == "building":
                 break
             time.sleep(0.05)
 
@@ -1358,6 +1395,197 @@ class GraphPipelineTests(unittest.TestCase):
         # Both end with .csv
         self.assertTrue(dest1.name.endswith(".csv"))
         self.assertTrue(dest2.name.endswith(".csv"))
+
+    # -----------------------------------------------------------------------
+    # 23. child exits without delivering EOF -> success (exit 0)
+    # -----------------------------------------------------------------------
+
+    def test_exit_without_eof_success_returns_promptly(self) -> None:
+        """When the child process exits (poll() returns 0) but the stdout
+        reader never delivers EOF, the pipeline must still detect the exit
+        and transition through to completed.
+
+        The fake readline() blocks indefinitely after yielding buffered
+        lines -- it never returns EOF, replicating the real failure.
+        The old code gated poll() on stdout_eof and would hang forever;
+        the fixed code polls independently of EOF and completes promptly.
+        """
+        build_output = [
+            "workflow: create_base_text_units\n",
+            "workflow: create_entities\n",
+        ]
+        captured: List[_FakeProcess] = []
+        p = self._make_pipeline(
+            finalizer_factory=_noop_finalizer_factory,
+            popen_factory=_make_popen_factory(
+                stdout_lines=build_output,
+                returncode=0,
+                exited_without_eof=True,
+                captured=captured,
+            ),
+            popen_cmd_factory=lambda gt, root: ["fake-index"],
+        )
+        p.start()
+
+        job = p.submit("ground")
+        t0 = time.monotonic()
+        try:
+            self._wait_for_status(job.id, "completed", timeout=10)
+
+            done = self.store.get(job.id)
+            self.assertEqual(done.status, "completed")
+            self.assertEqual(done.progress, 100)
+
+            # The fake process must have been queried for exit status
+            self.assertEqual(len(captured), 1)
+            self.assertTrue(captured[0]._exited_without_eof)
+            # Deterministic: the reader thread consumed all buffered lines
+            # before poll() reported exit, so log preservation is proven.
+            self.assertTrue(captured[0]._all_lines_read.is_set())
+        finally:
+            # Release the permanently-blocked reader so it is not orphaned.
+            if captured:
+                captured[0]._read_event.set()
+
+        elapsed = time.monotonic() - t0
+        self.assertLess(
+            elapsed,
+            3.0,
+            "exited_without_eof took {0:.1f}s; "
+            "old reader join would stall ~5s".format(elapsed),
+        )
+
+    # -----------------------------------------------------------------------
+    # 24. child exits without delivering EOF -> failure (exit non-zero)
+    # -----------------------------------------------------------------------
+
+    def test_exit_without_eof_failure_returns_promptly(self) -> None:
+        """When the child process exits non-zero (poll() returns 42) but
+        the stdout reader never delivers EOF, the pipeline must detect the
+        exit and transition to failed with the exit code in the error.
+
+        The fake readline() blocks indefinitely after yielding buffered
+        lines -- it never returns EOF.  Deterministic sync: poll() gates
+        on _all_lines_read, so all buffered lines are processed via the
+        normal line_queue path before exit is detected.
+        """
+        build_output = [
+            "workflow: create_base_text_units\n",
+            "ERROR: something broke\n",
+        ]
+        captured: List[_FakeProcess] = []
+        p = self._make_pipeline(
+            finalizer_factory=_noop_finalizer_factory,
+            popen_factory=_make_popen_factory(
+                stdout_lines=build_output,
+                returncode=42,
+                exited_without_eof=True,
+                captured=captured,
+            ),
+            popen_cmd_factory=lambda gt, root: ["fake-index"],
+        )
+        p.start()
+
+        job = p.submit("ground")
+        t0 = time.monotonic()
+        try:
+            self._wait_for_status(job.id, "failed", timeout=10)
+
+            done = self.store.get(job.id)
+            self.assertEqual(done.status, "failed")
+            self.assertIn("42", done.error_summary)
+            # Log tail from the lines that were produced before exit
+            self.assertIn("ERROR", done.log_tail)
+            # Deterministic proof that the reader consumed all lines
+            self.assertEqual(len(captured), 1)
+            self.assertTrue(captured[0]._all_lines_read.is_set())
+        finally:
+            # Release the permanently-blocked reader so it is not orphaned.
+            if captured:
+                captured[0]._read_event.set()
+
+        elapsed = time.monotonic() - t0
+        self.assertLess(
+            elapsed,
+            3.0,
+            "exited_without_eof took {0:.1f}s; "
+            "old reader join would stall ~5s".format(elapsed),
+        )
+
+    # -----------------------------------------------------------------------
+    # 25. child exits without EOF, no stdout lines at all
+    # -----------------------------------------------------------------------
+
+    def test_exit_without_eof_no_output_returns_promptly(self) -> None:
+        """When the child exits immediately with no stdout output and no
+        EOF, the pipeline must still detect the exit via poll().
+
+        readline() marks consumption (zero lines) then blocks forever --
+        poll() is the only way to notice the exit.
+        """
+        captured: List[_FakeProcess] = []
+        p = self._make_pipeline(
+            finalizer_factory=_noop_finalizer_factory,
+            popen_factory=_make_popen_factory(
+                stdout_lines=[],
+                returncode=0,
+                exited_without_eof=True,
+                captured=captured,
+            ),
+            popen_cmd_factory=lambda gt, root: ["fake-index"],
+        )
+        p.start()
+
+        job = p.submit("ground")
+        t0 = time.monotonic()
+        try:
+            self._wait_for_status(job.id, "completed", timeout=10)
+
+            done = self.store.get(job.id)
+            self.assertEqual(done.status, "completed")
+            # Deterministic: even with no output, the reader thread
+            # signaled _all_lines_read before poll() reported exit.
+            self.assertEqual(len(captured), 1)
+            self.assertTrue(captured[0]._all_lines_read.is_set())
+        finally:
+            # Release the permanently-blocked reader so it is not orphaned.
+            if captured:
+                captured[0]._read_event.set()
+
+        elapsed = time.monotonic() - t0
+        self.assertLess(
+            elapsed,
+            3.0,
+            "exited_without_eof took {0:.1f}s; "
+            "old reader join would stall ~5s".format(elapsed),
+        )
+
+    # -----------------------------------------------------------------------
+    # 26. worker-loop safety net: unexpected exception -> failed
+    # -----------------------------------------------------------------------
+
+    def test_worker_loop_safety_net_handles_unexpected_exception(self) -> None:
+        """An unexpected exception escaping _run_job must not leave the job
+        in a non-terminal state.  The safety net transitions it to failed."""
+        p = self._make_pipeline(
+            finalizer_factory=_noop_finalizer_factory,
+            popen_factory=_make_popen_factory(returncode=0),
+            popen_cmd_factory=lambda gt, root: ["fake-index"],
+        )
+
+        # Monkey-patch _run_job to raise before its own try/except block.
+        def _raising_run_job(job_id: str) -> None:
+            raise RuntimeError("simulated unexpected worker error")
+
+        p._run_job = _raising_run_job  # type: ignore[assignment]
+        p.start()
+
+        job = p.submit("ground")
+        self._wait_for_status(job.id, "failed", timeout=10)
+
+        done = self.store.get(job.id)
+        self.assertEqual(done.status, "failed")
+        self.assertIn("simulated unexpected worker error", done.error_summary)
 
 
 class InternalImportFinalizerTests(unittest.TestCase):

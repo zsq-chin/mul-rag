@@ -24,6 +24,13 @@ from graphrag_api.schemas import (
     VALID_GRAPH_TYPES,
 )
 
+# Bounded timeout for sqlite3.connect() and PRAGMA busy_timeout.
+# Both must agree so the Python-level wait and SQLite-level wait are
+# consistent.  The value is in **seconds** for sqlite3.connect(timeout=)
+# and in **milliseconds** for PRAGMA busy_timeout.
+_SQLITE_CONNECT_TIMEOUT_S = 5.0
+_SQLITE_BUSY_TIMEOUT_MS = 5000
+
 
 class ActiveJobError(ValueError):
     """Raised when a new job would collide with an existing active job."""
@@ -34,6 +41,10 @@ class JobStore:
 
     Safe for multi-thread per-operation use — every method opens its own
     ``sqlite3.connect()`` so no connection is shared across threads.
+
+    WAL is configured **once** during ``__init__``.  Per-operation
+    connections only set ``busy_timeout`` — they never renegotiate
+    journal mode, which eliminates the WAL lock observed in Task 14.
     """
 
     _SCHEMA = """\
@@ -65,14 +76,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_active_graph_type
         self._db_path = str(db_path)
         # Ensure parent directory exists before opening the database.
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        # Create schema once; subsequent connects are no-ops.
-        # Wrap everything in BEGIN IMMEDIATE so two processes cannot both
-        # see a missing column and race on the ALTER TABLE.
-        with self._connect() as cur:
+
+        # --- Configure WAL exactly once, with busy_timeout set FIRST ---
+        # This eliminates the Task 14 root cause: PRAGMA journal_mode=WAL
+        # blocks on Docker Desktop Windows bind mounts when another reader
+        # holds a lock, and the old code set busy_timeout AFTER the WAL
+        # pragma so the timeout never applied to the WAL negotiation.
+        init_conn = sqlite3.connect(
+            self._db_path, timeout=_SQLITE_CONNECT_TIMEOUT_S,
+        )
+        try:
+            cur = init_conn.cursor()
+            # busy_timeout must be set BEFORE journal_mode so the timeout
+            # protects the WAL negotiation itself.
+            cur.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+            cur.execute("PRAGMA journal_mode=WAL")
+
+            # Create schema once; subsequent connects are no-ops.
+            # Wrap in BEGIN IMMEDIATE so two processes cannot both see a
+            # missing column and race on the ALTER TABLE.
             # executescript commits any open transaction first, then runs
-            # the whole script (idempotent schema creation).  The explicit
-            # BEGIN IMMEDIATE below protects the migration check.
+            # the whole script (idempotent schema creation).
             cur.executescript(self._SCHEMA)
+
             # --- migrate legacy tables missing the `stage` column ---
             # Start a fresh transaction after executescript's implicit COMMIT.
             cur.execute("BEGIN IMMEDIATE")
@@ -87,6 +113,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_active_graph_type
                     "UPDATE jobs SET stage = status WHERE stage = 'queued' AND status != 'queued'"
                 )
             cur.execute("COMMIT")
+        finally:
+            init_conn.close()
 
     # -- helpers ----------------------------------------------------------
 
@@ -96,11 +124,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_active_graph_type
 
         Opening per-call keeps the store safe for multi-threaded access
         without a connection pool.  The connection is closed on exit.
+
+        WAL is **not** renegotiated here — it was set once in __init__.
+        Only ``busy_timeout`` is applied so concurrent operations don't
+        deadlock on the journal-mode change.
         """
-        conn = sqlite3.connect(self._db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn = sqlite3.connect(
+            self._db_path, timeout=_SQLITE_CONNECT_TIMEOUT_S,
+        )
         try:
+            conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
             yield conn.cursor()
         finally:
             conn.close()
