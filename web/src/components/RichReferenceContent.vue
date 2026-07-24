@@ -44,7 +44,7 @@
 import { computed, ref } from 'vue'
 
 import AuthenticatedImage from '@/components/AuthenticatedImage.vue'
-import { renderRichContent } from '@/utils/richContent.mjs'
+import { renderRichContent, stripInlineImages, stripMarkdownImageSyntax } from '@/utils/richContent.mjs'
 
 const props = defineProps({
   content: { type: String, default: '' },
@@ -53,7 +53,13 @@ const props = defineProps({
 
 const previewImage = ref(null)
 
-const sanitizedContent = computed(() => renderRichContent(props.content, window))
+const hasImages = computed(() => props.images.some(Boolean))
+
+const sanitizedContent = computed(() => {
+  const source = hasImages.value ? stripMarkdownImageSyntax(props.content) : props.content
+  const html = renderRichContent(source, window)
+  return hasImages.value ? stripInlineImages(html, window) : html
+})
 
 function normalizeImage(image) {
   const raw = typeof image === 'string' ? { url: image } : (image || {})
@@ -122,6 +128,17 @@ const standaloneImages = computed(() => {
     margin: 10px 0;
     border: 1px solid var(--border);
     border-radius: 6px;
+  }
+
+  :deep([data-rich-caption]),
+  :deep(.rich-image-caption) {
+    display: inline-block;
+    padding: 2px 6px;
+    margin: 2px 0;
+    color: var(--text-secondary);
+    font-size: 0.9em;
+    background: var(--hover);
+    border-radius: 4px;
   }
 
   :deep(pre) {

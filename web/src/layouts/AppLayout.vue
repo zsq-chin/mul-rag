@@ -537,6 +537,12 @@ div.header, #app-router-view {
       min-width: 48px;
     }
   }
+
+  .app-layout #app-router-view.with-top-bar.with-header {
+    margin-top: 0;
+    min-height: 0;
+  }
+
   .app-layout .chat-box::webkit-scrollbar {
     width: 0;
   }

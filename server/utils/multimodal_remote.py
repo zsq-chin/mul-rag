@@ -8,7 +8,7 @@ import requests
 
 
 DEFAULT_MULTIMODAL_API_BASE = "http://localhost:8002/api/v1"
-MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((?:\./)?images/([^)]+)\)")
+MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((?:\.?/)?images/([^)]+)\)")
 MULTIMODAL_PROXY_BLOCKED_HEADERS = {
     "authorization",
     "connection",
@@ -153,7 +153,9 @@ def _normalize_image_path(value: Any) -> str | None:
     decoded_path = unquote(raw_path).replace("\\", "/")
     if "\x00" in decoded_path:
         return None
-    parsed = urlsplit(decoded_path)
+    # URL-encode '#' before parsing so filenames like "fig#1.png" are not
+    # misinterpreted as having a URL fragment by urlsplit.
+    parsed = urlsplit(decoded_path.replace("#", "%23"))
     if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
         return None
     if decoded_path.startswith("/") or re.match(r"^[A-Za-z]:", decoded_path):

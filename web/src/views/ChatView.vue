@@ -65,7 +65,13 @@ const convs = reactive([{
 }]) 
 
 const state = reactive({
-  isSidebarOpen: JSON.parse(localStorage.getItem('chat-sidebar-open') || 'true'),
+  isSidebarOpen: (() => {
+    const stored = localStorage.getItem('chat-sidebar-open')
+    // On narrow viewports, start closed regardless of persisted desktop pref.
+    // The desktop preference is left intact in localStorage.
+    if (window.innerWidth <= 520) return false
+    return stored ? JSON.parse(stored) : true
+  })(),
   hasLoadedHistory: false
 })
 
@@ -226,6 +232,7 @@ onMounted(() => {
       user-select: none;
       white-space: nowrap;
       overflow: hidden;
+      color: var(--text-primary);
     }
 
     .action {
@@ -287,7 +294,7 @@ onMounted(() => {
 
       &:hover {
         color: #F93A37;
-        background-color: #EEE;
+        background-color: var(--gray-200);
       }
     }
 
@@ -341,9 +348,15 @@ onMounted(() => {
     position: absolute;
     z-index: 101;
     width: 300px;
+    max-width: 85vw;
     height: 100%;
     border-radius: 0 16px 16px 0;
     box-shadow: 0 0 10px 1px rgba(0, 0, 0, 0.05);
+
+    &.is-open {
+      width: 300px;
+      max-width: 85vw;
+    }
 
     &:not(.is-open) {
       width: 0;

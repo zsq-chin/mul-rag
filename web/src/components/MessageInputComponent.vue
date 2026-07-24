@@ -145,7 +145,7 @@ onMounted(() => {
 
   &:focus-within {
     border-color: var(--main-500);
-    background: white;
+    background: var(--surface);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   }
 
@@ -162,7 +162,7 @@ onMounted(() => {
     background-color: transparent;
     border: none;
     margin: 0;
-    color: #222222;
+    color: var(--text-primary);
     font-size: 14px;
     outline: none;
     resize: none;
@@ -264,6 +264,17 @@ button.ant-btn-icon-only {
   .input-box {
     border-radius: 15px;
     padding: 0.625rem 0.875rem;
+  }
+
+  .input-options {
+    flex-wrap: wrap;
+    overflow-x: hidden;
+
+    .options__left {
+      flex-wrap: wrap;
+      min-width: 0;
+      overflow: hidden;
+    }
   }
 }
 </style>

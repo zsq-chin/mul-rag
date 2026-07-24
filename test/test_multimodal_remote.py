@@ -231,6 +231,23 @@ class MultimodalRemoteTests(unittest.TestCase):
         self.assertIn("fileId=", results[0]["images"][0]["url"])
         self.assertIn("imagePath=", results[0]["images"][0]["url"])
 
+    def test_markdown_image_with_leading_slash_is_extracted(self):
+        payload = {
+            "ok": True,
+            "results": [
+                {
+                    "fileId": "file-1",
+                    "text": "![图 4-2 2# 井含水习投影](/images/图 4-2 2# 井含水习投影.png)\n\nSome description",
+                }
+            ],
+        }
+
+        results = normalize_multimodal_results(payload, kb_id="kb-1")
+
+        self.assertEqual(len(results[0]["images"]), 1)
+        self.assertEqual(results[0]["images"][0]["name"], "图 4-2 2# 井含水习投影.png")
+        self.assertIn("imagePath=", results[0]["images"][0]["url"])
+
     @patch("server.utils.multimodal_remote.requests.post")
     def test_search_remote_preserves_kb_on_http_error(self, mock_post):
         response = Mock()

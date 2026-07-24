@@ -967,6 +967,7 @@ const handleQuestionClick = (question) => {
 .chat {
   position: relative;
   width: 100%;
+  min-width: 0;
   max-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -1128,7 +1129,8 @@ const handleQuestionClick = (question) => {
   width: 100%;
   max-width: 800px;
   margin: 0 auto;
-  flex-grow: 1;
+  flex: 1 1 0%;
+  min-height: 0;
   padding: 1rem 2rem;
   display: flex;
   flex-direction: column;
@@ -1161,6 +1163,7 @@ const handleQuestionClick = (question) => {
   width: 100%;
   margin: 0 auto;
   padding: 4px 2rem 0 2rem;
+  flex-shrink: 0;
 
   .message-input-wrapper {
     width: 100%;
@@ -1316,6 +1319,9 @@ const handleQuestionClick = (question) => {
 
   .bottom {
     padding: 0.5rem 0.5rem;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow-x: hidden;
 
     .input-box {
       border-radius: 8px;
