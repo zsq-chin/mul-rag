@@ -23,6 +23,21 @@ SAGE 是一个基于知识图谱的智能对话系统，结合了大型语言模
 - 模型管理(src/models/)
 - Web界面(web/)
 
+#### 部署与运维
+
+完整的环境变量配置、密钥生成与轮换、备份恢复、图作业管理及回滚流程请参阅
+[运维部署指南](docs/operations/platform-deployment.md)。
+
+快速验证运行中的平台：
+
+```powershell
+$sa = Get-Credential -UserName superadmin
+$ad = Get-Credential -UserName admin
+$us = Get-Credential -UserName tester
+.\scripts\smoke_platform.ps1 -BaseUrl http://localhost:5050 `
+    -SuperadminCredential $sa -AdminCredential $ad -UserCredential $us
+```
+
 #### 参与贡献
 
 1.  Fork 本仓库

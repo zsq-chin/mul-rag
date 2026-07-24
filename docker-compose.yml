@@ -127,9 +127,16 @@ services:
       - api
     networks:
       - app-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - NODE_ENV=development
       - VITE_API_URL=http://api:5050
+      - http_proxy=${http_proxy:-}
+      - https_proxy=${https_proxy:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1,api,graph,milvus,mysql,.local}
     command: pnpm run server
     restart: unless-stopped
 
@@ -200,6 +207,8 @@ services:
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in .env}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in .env}
       MILVUS_LOG_LEVEL: error
     volumes:
       - ./docker/volumes/milvus/milvus:/var/lib/milvus
@@ -267,11 +276,17 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
       - WORKER_URL=http://tianshu-worker:8001
       - DATABASE_PATH=/app/data/db/mineru_tianshu.db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     networks:
       - app-network
     depends_on:
       tianshu-worker:
-        condition: service_started
+        condition: service_healthy
 
 
   tianshu-worker:
@@ -281,7 +296,7 @@ services:
     image: tianshu-worker:latest
     container_name: tianshu-worker
     restart: unless-stopped
-    command: [ "python", "litserve_worker.py" ]
+    command: [ "python", "litserve_worker.py", "--port", "8001" ]
     ports:
       - "8001:8001"
     volumes:
@@ -299,6 +314,12 @@ services:
       - DATABASE_PATH=/app/data/db/mineru_tianshu.db
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
       - HF_ENDPOINT=https://hf-mirror.com
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     networks:
       - app-network
 

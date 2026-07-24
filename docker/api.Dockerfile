@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6
 
+ENV UV_HTTP_TIMEOUT=600
+
 # 先复制依赖描述文件
 COPY ../pyproject.toml /app/pyproject.toml
 COPY ../uv.lock /app/uv.lock
