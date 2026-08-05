@@ -35,6 +35,11 @@ from server.utils.multimodal_remote import (
     normalize_multimodal_image_path,
     normalize_multimodal_kbs,
 )
+from server.utils.stream_sanitizer import (
+    ChatStreamAssembler,
+    complete_related_questions,
+    parse_related_questions,
+)
 
 chat = APIRouter(prefix="/chat")
 
@@ -240,20 +245,6 @@ async def chat_get(current_user: User = Depends(get_required_user)):
     """聊天服务健康检查（需要登录）"""
     return "Chat Get!"
 
-def parse_related_questions(content: str) -> list[str]:
-    """简单的解析函数，将模型生成的文本按行分割并清理"""
-    questions = []
-    lines = content.strip().split('\n')
-    for line in lines:
-        # 去掉序号如 "1. " 或 "- "
-        clean_line = line.strip()
-        for prefix in ["1.", "2.", "3.", "-", "*"]:
-            if clean_line.startswith(prefix):
-                clean_line = clean_line[len(prefix):].strip()
-                break
-        if clean_line and "?" in clean_line or "？" in clean_line: # 简单的过滤
-            questions.append(clean_line)
-    return questions[:3] # 限制返回3个
 
 @chat.post("/")
 async def chat_post(
@@ -360,8 +351,8 @@ async def chat_post(
         messages = history_manager.get_history_with_msg(modified_query, max_rounds=meta.get('history_round'))
         history_manager.add_user(query)  # 注意这里使用原始查询
 
-        content = ""
         reasoning_content = ""
+        assembler = ChatStreamAssembler()
         try:
             loop = asyncio.get_running_loop()
             sync_iter = await loop.run_in_executor(
@@ -376,15 +367,27 @@ async def chat_post(
                     yield chunk
                     continue
 
-                # 文心一言
+                delta_content = delta.content or ""
                 if hasattr(delta, 'is_full') and delta.is_full:
-                    content = delta.content
+                    update = assembler.feed_snapshot(delta_content)
                 else:
-                    content += delta.content or ""
+                    update = assembler.feed_incremental(delta_content)
+                if update:
+                    yield make_chunk(
+                        content=update.content,
+                        replace_content=update.replace_content,
+                        status="loading",
+                    )
 
-                chunk = make_chunk(content=delta.content, status="loading")
-                yield chunk
+            update = assembler.finish()
+            if update:
+                yield make_chunk(
+                    content=update.content,
+                    replace_content=update.replace_content,
+                    status="loading",
+                )
 
+            content = assembler.content
             logger.debug(f"Final response: {content}")
             # === 新增：生成相关问题 ===
             related_questions = []
@@ -411,11 +414,12 @@ async def chat_post(
                     # 兼容不同的模型返回格式
                     rec_text = rec_response.content if hasattr(rec_response, 'content') else str(rec_response)
                     related_questions = parse_related_questions(rec_text)
-                    logger.debug(f"Generated related questions: {related_questions}")
             except Exception as e:
                 logger.error(f"生成推荐问题失败: {e}")
                 # 失败不影响主要流程，只是没有推荐问题
                 pass
+            related_questions = complete_related_questions(related_questions)
+            logger.debug(f"Generated related questions: {related_questions}")
 
             # === 修改结束：将 related_questions 加入到 finished 块中 ===
 
@@ -425,6 +429,13 @@ async def chat_post(
                             related_questions=related_questions) # <--- 添加这一行
 
         except Exception as e:
+            update = assembler.abort()
+            if update:
+                yield make_chunk(
+                    content=update.content,
+                    replace_content=update.replace_content,
+                    status="loading",
+                )
             # ... 异常处理保持不变 ...
             logger.error(f"Model error: {e}, {traceback.format_exc()}")
             yield make_chunk(message=f"Model error: {e}", status="error")

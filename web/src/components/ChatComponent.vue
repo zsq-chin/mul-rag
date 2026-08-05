@@ -1,5 +1,5 @@
 <template>
-  <div class="chat"  ref="chatContainer" :class="{ 'refs-sidebar-open': refsSidebarVisible && refsSidebarPinned }">
+  <div class="chat" :class="{ 'refs-sidebar-open': refsSidebarVisible && refsSidebarPinned }">
     <div class="chat-header">
       <div class="header__left">
         <div
@@ -58,7 +58,7 @@
         </div>
       </div>
     </div>
-    <div class="chat-box" :class="{ 'wide-screen': meta.wideScreen, 'font-smaller': meta.fontSize === 'smaller', 'font-larger': meta.fontSize === 'larger' }">
+    <div class="chat-box" ref="messagesContainer" :class="{ 'wide-screen': meta.wideScreen, 'font-smaller': meta.fontSize === 'smaller', 'font-larger': meta.fontSize === 'larger' }">
       <MessageComponent
         v-for="(message, index) in conv.messages"
         :message="message"
@@ -212,7 +212,7 @@ const configStore = useConfigStore()
 const userStore = useUserStore()
 const userModelsStore = useUserModelsStore()
 const { conv, state } = toRefs(props)
-const chatContainer = ref(null)
+const messagesContainer = ref(null)
 
 const isStreaming = ref(false)
 const selectedModel = ref({ kind: 'builtin', provider: null, name: null })
@@ -427,8 +427,10 @@ const renameTitle = () => {
 }
 
 const handleUserScroll = () => {
+  if (!messagesContainer.value) return
+
   // 计算我们是否接近底部（100像素以内）
-  const isNearBottom = chatContainer.value.scrollHeight - chatContainer.value.scrollTop - chatContainer.value.clientHeight < 20;
+  const isNearBottom = messagesContainer.value.scrollHeight - messagesContainer.value.scrollTop - messagesContainer.value.clientHeight < 20;
 
   // 如果用户不在底部，则仅将其标记为用户滚动
   userIsScrolling.value = !isNearBottom;
@@ -440,7 +442,10 @@ const handleUserScroll = () => {
 const scrollToBottom = () => {
   if (shouldAutoScroll.value) {
     setTimeout(() => {
-      chatContainer.value.scrollTop = chatContainer.value.scrollHeight - chatContainer.value.clientHeight;
+      const container = messagesContainer.value
+      if (container) {
+        container.scrollTop = container.scrollHeight - container.clientHeight;
+      }
     }, 10);
   }
 }
@@ -481,8 +486,12 @@ const updateMessage = (info) => {
   const msg = conv.value.messages.find((msg) => msg.id === info.id);
   if (msg) {
     try {
-      // 特殊处理：content需要追加而不是替换
-      if (info.content != null && info.content !== '') {
+      if (info.replace_content && info.content != null) {
+        msg.content = info.content;
+        msg.isCollectingThinking = false;
+      }
+      // 普通增量响应需要追加，而全量快照修订由上面的分支替换。
+      else if (info.content != null && info.content !== '') {
         // 检查新内容中是否有<think>标签
         if (info.content.includes('<think>') && !msg.isCollectingThinking) {
           // 开始收集思考内容
@@ -782,7 +791,7 @@ onMounted(async () => {
     console.warn('个人模型列表加载失败:', error?.message || 'unknown')
   }
   refsSidebarRef.value.togglePin()
-  chatContainer.value.addEventListener('scroll', handleUserScroll);
+  messagesContainer.value?.addEventListener('scroll', handleUserScroll);
 
   // 检查现有消息中是否有内容为空的情况
   if (conv.value.messages && conv.value.messages.length > 0) {
@@ -803,16 +812,17 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  if (chatContainer.value) {
-    chatContainer.value.removeEventListener('scroll', handleUserScroll);
-  }
+  messagesContainer.value?.removeEventListener('scroll', handleUserScroll);
 });
 
 // 添加新函数来处理特定的滚动行为
 const forceScrollToBottom = () => {
   shouldAutoScroll.value = true;
   setTimeout(() => {
-    chatContainer.value.scrollTop = chatContainer.value.scrollHeight - chatContainer.value.clientHeight;
+    const container = messagesContainer.value
+    if (container) {
+      container.scrollTop = container.scrollHeight - container.clientHeight;
+    }
   }, 10);
 };
 
@@ -972,12 +982,12 @@ const handleQuestionClick = (question) => {
   display: flex;
   flex-direction: column;
   overflow-x: hidden;
+  overflow-y: hidden;
   background: var(--app-bg);
   color: var(--text-primary);
   position: relative;
   box-sizing: border-box;
   flex: 5 5 200px;
-  overflow-y: scroll;
   transition: padding-right 0.3s ease;
 
   &.refs-sidebar-open {
@@ -1131,6 +1141,8 @@ const handleQuestionClick = (question) => {
   margin: 0 auto;
   flex: 1 1 0%;
   min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 1rem 2rem;
   display: flex;
   flex-direction: column;
@@ -1158,8 +1170,8 @@ const handleQuestionClick = (question) => {
 }
 
 .bottom {
-  position: sticky;
-  bottom: 0;
+  position: relative;
+  z-index: 10;
   width: 100%;
   margin: 0 auto;
   padding: 4px 2rem 0 2rem;
@@ -1203,27 +1215,27 @@ const handleQuestionClick = (question) => {
 
 
 
-.chat::-webkit-scrollbar {
+.chat-box::-webkit-scrollbar {
   position: absolute;
   width: 4px;
 }
 
-.chat::-webkit-scrollbar-track {
+.chat-box::-webkit-scrollbar-track {
   background: transparent;
   border-radius: 4px;
 }
 
-.chat::-webkit-scrollbar-thumb {
+.chat-box::-webkit-scrollbar-thumb {
   background: var(--gray-400);
   border-radius: 4px;
 }
 
-.chat::-webkit-scrollbar-thumb:hover {
+.chat-box::-webkit-scrollbar-thumb:hover {
   background: rgb(100, 100, 100);
   border-radius: 4px;
 }
 
-.chat::-webkit-scrollbar-thumb:active {
+.chat-box::-webkit-scrollbar-thumb:active {
   background: rgb(68, 68, 68);
   border-radius: 4px;
 }

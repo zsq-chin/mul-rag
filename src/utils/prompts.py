@@ -1,7 +1,12 @@
 from datetime import datetime
 
 def get_system_prompt():
-    return (f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    return (
+        f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        "请直接、准确地回答用户问题，只输出回答正文。"
+        "不要输出 user、assistant、system 等角色标记，"
+        "不要模拟下一轮对话，也不要在正文末尾生成后续用户问题。"
+    )
 
 
 knowbase_qa_template = """
@@ -110,4 +115,3 @@ RELATED_QUESTIONS_PROMPT = """你是一个智能助手。请根据用户的提�
 当前回答：{answer}
 
 推荐问题："""
-

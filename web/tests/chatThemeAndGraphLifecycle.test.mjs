@@ -6,6 +6,10 @@ const messageComponent = readFileSync(
   new URL('../src/components/MessageComponent.vue', import.meta.url),
   'utf8',
 )
+const chatComponent = readFileSync(
+  new URL('../src/components/ChatComponent.vue', import.meta.url),
+  'utf8',
+)
 const graphView = readFileSync(
   new URL('../src/views/GraphView.vue', import.meta.url),
   'utf8',
@@ -35,6 +39,34 @@ test('knowledge-chat answers follow the selected light or dark theme without a w
     messageComponent,
     /\.message-md\s+\.md-editor-preview[^{]*\{[^}]*--md-theme-color:\s*var\(--text-primary\)[^}]*\}/,
     'the selected preview theme must use the application text token',
+  )
+})
+
+test('full-snapshot revisions replace rendered chat content', () => {
+  assert.match(chatComponent, /replace_content/)
+  assert.match(
+    chatComponent,
+    /if\s*\(\s*info\.replace_content[\s\S]*?msg\.content\s*=\s*info\.content/,
+  )
+})
+
+test('chat messages scroll inside their own pane and cannot overflow behind the composer', () => {
+  assert.match(chatComponent, /class="chat-box"\s+ref="messagesContainer"/)
+  assert.match(
+    chatComponent,
+    /\.chat\s*\{[\s\S]*?overflow-y:\s*hidden/,
+  )
+  assert.match(
+    chatComponent,
+    /\.chat-box\s*\{[\s\S]*?overflow-y:\s*auto/,
+  )
+  assert.match(
+    chatComponent,
+    /messagesContainer\.value\.scrollHeight\s*-\s*messagesContainer\.value\.scrollTop/,
+  )
+  assert.doesNotMatch(
+    chatComponent,
+    /chatContainer\.value\.scrollHeight\s*-\s*chatContainer\.value\.scrollTop/,
   )
 })
 
