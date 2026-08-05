@@ -62,7 +62,8 @@ _mm_remote = _make_module(
 _make_module(
     "src.utils.prompts",
     multi_query_generation_prompt="GEN question={question} history={history} count={count}",
-    multi_query_refine_prompt="REFINE question={question} results={results} previous={previous} count={count}",
+    multi_query_assessment_prompt="ASSESS question={question} results={results}",
+    multi_query_refine_prompt="REFINE question={question} results={results} assessment={assessment} previous={previous} count={count}",
 )
 
 _config_mod = _make_module("src.config", Config=_StubConfig)
@@ -189,6 +190,22 @@ def _make_retriever(kb, model):
     # Avoid the web-search guard touching a missing web_searcher when disabled.
     r.query_web = MagicMock(return_value={"results": [], "message": "Web search is disabled"})
     return r, kb_instance
+
+
+def _assess_ok(reason="检索到足够内容"):
+    return ("ASSESS", json.dumps({"has_value": True, "need_more": False, "next_keywords": [], "reason": reason}))
+
+
+def _assess_more(reason="内容不足，需继续检索", keywords=None):
+    return (
+        "ASSESS",
+        json.dumps({
+            "has_value": False,
+            "need_more": True,
+            "next_keywords": keywords or ["补充关键词"],
+            "reason": reason,
+        }),
+    )
 
 
 def _meta(**overrides):
@@ -318,7 +335,7 @@ class FinalRerankTests(unittest.TestCase):
 
 class GenerateSubQueriesTests(unittest.TestCase):
     def test_parses_model_output(self):
-        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2", "q3"]))])
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2", "q3"])), _assess_ok()])
         r, kb = _make_retriever(_FakeKB(), model)
         out = r.generate_sub_queries("原始问题", [{"role": "user", "content": "历史"}], _meta(), 3)
         self.assertEqual(out, ["q1", "q2", "q3"])
@@ -331,7 +348,7 @@ class GenerateSubQueriesTests(unittest.TestCase):
 
 class MultiRoundRetrievalTests(unittest.TestCase):
     def test_stops_after_round_one_when_recall_sufficient(self):
-        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2", "q3"]))])
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2", "q3"])), _assess_ok()])
         kb = _FakeKB(default_results=[_res(1), _res(2), _res(3), _res(4), _res(5)])
         r, kb = _make_retriever(kb, model)
 
@@ -354,6 +371,7 @@ class MultiRoundRetrievalTests(unittest.TestCase):
         # Always one deduped chunk -> round 1 recall too low -> round 2 refine.
         model = _ScriptedModel([
             ("GEN", json.dumps(["q1", "q2", "q3"])),
+            _assess_more(),
             ("REFINE", json.dumps(["r1", "r2"])),
         ])
         kb = _FakeKB(default_results=[_res(1, "同一段内容")])
@@ -373,7 +391,7 @@ class MultiRoundRetrievalTests(unittest.TestCase):
         self.assertTrue(any("第2轮" in m for m in progress))
 
     def test_aggregates_results_across_subqueries_and_dedupes(self):
-        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2"]))])
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2"])), _assess_ok()])
         kb = _FakeKB(results_by_query={
             "原始问题": [_res(0, "Z")],
             "q1": [_res(1, "A"), _res(2, "B")],
@@ -389,7 +407,7 @@ class MultiRoundRetrievalTests(unittest.TestCase):
         self.assertEqual(ids, [0, 1, 2, 3])
 
     def test_final_results_capped_at_topk_and_round_log_shape(self):
-        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2", "q3", "q4"]))])
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2", "q3", "q4"])), _assess_ok()])
         kb = _FakeKB(default_results=[_res(1), _res(2), _res(3), _res(4), _res(5), _res(6), _res(7)])
         r, kb = _make_retriever(kb, model)
 
@@ -401,7 +419,7 @@ class MultiRoundRetrievalTests(unittest.TestCase):
         self.assertEqual(refs["multi_round"]["mode"], "multi_round")
 
     def test_single_subquery_failure_does_not_abort(self):
-        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2", "q3"]))])
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2", "q3"])), _assess_ok()])
         kb = _FlakyKB(
             fail_on=["q2"],
             results_by_query={"原始问题": [_res(9, "orig")], "q1": [_res(1, "one")]},
@@ -429,9 +447,37 @@ class MultiRoundRetrievalTests(unittest.TestCase):
         self.assertEqual(refs["multi_round"]["sub_queries"], [])
         self.assertEqual(len(kb.calls), 0)
 
+    def test_first_round_empty_forces_more_rounds(self):
+        """第一轮一个结果都没检索到，即使模型误判 has_value，也要强制继续多检索几轮。"""
+        model = _ScriptedModel([
+            ("GEN", json.dumps(["q1"])),
+            _assess_ok("误判：认为内容足够"),  # 模型误判，但 recall=0 守卫会强制继续
+            ("REFINE", json.dumps(["r1"])),
+        ])
+        kb = _FakeKB(default_results=[])  # 始终检索不到
+        r, kb = _make_retriever(kb, model)
+
+        refs = r.multi_round_retrieval(
+            "原始问题", [], {"query": "原始问题", "history": [], "meta": _meta(topK=5)},
+        )
+        self.assertEqual(refs["multi_round"]["rounds"][0]["recall"], 0)
+        # recall=0 强制多检索：至少进入第2轮
+        self.assertGreaterEqual(refs["multi_round"]["total_rounds"], 2)
+        # 第1轮 rw_query+q1，第2轮 r1
+        self.assertEqual(len(kb.calls), 3)
+
+    def test_assess_results_parses_model_output(self):
+        model = _ScriptedModel([_assess_more("缺少参数", ["压裂液类型"])])
+        r, kb = _make_retriever(_FakeKB(), model)
+        result = r.assess_results("问题", [_res(1), _mm_res(2, "mm")], _meta())
+        self.assertFalse(result["has_value"])
+        self.assertTrue(result["need_more"])
+        self.assertEqual(result["next_keywords"], ["压裂液类型"])
+        self.assertIn("缺少参数", result["reason"])
+
     def test_multimodal_subqueries_retrieve_remote_kb(self):
         """多轮模式下每个子问题都应调用远程多模态知识库检索并合并去重。"""
-        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2"]))])
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2"])), _assess_ok()])
         kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")], "q1": [_res(1, "a")]})
         r, kb = _make_retriever(kb, model)
 
@@ -467,7 +513,7 @@ class MultiRoundRetrievalTests(unittest.TestCase):
 
     def test_multimodal_failure_does_not_abort(self):
         """远程多模态检索失败只跳过该子问题，不影响其它子问题与整体流程。"""
-        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2"]))])
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2"])), _assess_ok()])
         kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")], "q1": [_res(1, "a")]})
         r, kb = _make_retriever(kb, model)
 

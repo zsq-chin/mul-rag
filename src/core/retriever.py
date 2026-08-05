@@ -366,17 +366,72 @@ class Retriever:
             questions = [query]
         return [q for q in questions if q][:count]
 
-    def generate_refined_queries(self, query, history, partial_results, existing_queries, meta, count):
-        """后续轮次：根据已有部分结果生成新的检索子问题，补充召回。"""
-        from src.utils.prompts import multi_query_refine_prompt
+    @staticmethod
+    def _result_text(r):
+        """从普通知识库结果（entity.text）或多模态结果（text）中提取文本。"""
+        if not isinstance(r, dict):
+            return ""
+        text = r.get("text")
+        if text:
+            return str(text)
+        entity = r.get("entity")
+        if isinstance(entity, dict) and entity.get("text"):
+            return str(entity["text"])
+        return ""
+
+    def _parse_assessment(self, text):
+        """解析模型输出的价值评估 JSON 对象，容错围栏/前后说明文字。"""
+        text = (text or "").strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            text = text[start : end + 1]
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return {}
+
+    def assess_results(self, question, results, meta):
+        """让模型评估检索到的内容是否有价值、是否需要继续检索。
+
+        返回 ``{"has_value", "need_more", "next_keywords", "reason"}``。
+        """
+        from src.utils.prompts import multi_query_assessment_prompt
         model = self._select_chat_model()
         snippets = "\n".join(
-            f"- {(r.get('entity') or {}).get('text', '')[:120]}"
-            for r in partial_results[:8] if r.get("entity")
-        )
+            f"- {self._result_text(r)[:150]}"
+            for r in results[:10] if self._result_text(r)
+        ) or "（无检索结果）"
+        prompt = multi_query_assessment_prompt.format(question=question, results=snippets)
+        try:
+            response = model.predict(prompt)
+            text = response.content if hasattr(response, "content") else str(response)
+            data = self._parse_assessment(text)
+        except Exception as e:
+            logger.error(f"多轮检索：内容价值评估失败: {e}")
+            data = {}
+        next_keywords = data.get("next_keywords") or []
+        if not isinstance(next_keywords, list):
+            next_keywords = [str(next_keywords)]
+        return {
+            "has_value": bool(data.get("has_value", False)),
+            "need_more": bool(data.get("need_more", True)),
+            "next_keywords": [str(k) for k in next_keywords if str(k).strip()][:8],
+            "reason": str(data.get("reason") or "").strip(),
+        }
+
+    def generate_next_queries(self, query, results_snippets, assessment, existing_queries, meta, count):
+        """后续轮次：根据评估反馈生成下一轮检索查询，补充召回。"""
+        from src.utils.prompts import multi_query_refine_prompt
+        model = self._select_chat_model()
         prompt = multi_query_refine_prompt.format(
             question=query,
-            results=snippets or "（无）",
+            results=results_snippets or "（无）",
+            assessment=json.dumps(assessment, ensure_ascii=False),
             previous="\n".join(existing_queries) or "（无）",
             count=count,
         )
@@ -385,9 +440,10 @@ class Retriever:
             text = response.content if hasattr(response, "content") else str(response)
             questions = self._parse_query_list(text)
         except Exception as e:
-            logger.error(f"多轮检索：扩展子问题生成失败: {e}")
+            logger.error(f"多轮检索：下一轮查询生成失败: {e}")
             questions = []
         return [q for q in questions if q and q not in existing_queries][:count]
+
 
     @staticmethod
     def _dedupe_results(results):
@@ -489,13 +545,16 @@ class Retriever:
 
     def multi_round_retrieval(self, query, history, refs, progress_cb=None):
         """
-        多轮检索：由模型多次生成检索子问题，逐个子问题检索并合并结果。
+        多轮检索：模型驱动的「检索 → 内容价值评估 → 再检索」循环。
 
-        - 第1轮：改写+生成 count 个子问题，并始终保留改写后的查询本身参与检索；
-        - 后续轮次：若合并命中数低于阈值，由模型依据部分结果生成新的子问题再次检索；
-        - 单个子问题检索失败只跳过该子问题，不中断整体流程；
-        - 普通向量知识库与（远程）多模态知识库都会用每个子问题各自检索并合并；
-        - 最后用检索实际所用的改写查询对合并结果整体重排，取 top_k。
+        - 第1轮：改写+生成 count 个面向向量检索的查询，并始终保留改写后的查询本身参与检索；
+        - 每轮检索后，模型评估检索到的内容是否有价值、是否需要继续；
+          「有足够价值」或「模型认为继续检索无意义」则停止；
+        - 第一轮一个结果都没检索到时，强制继续多检索几轮（不会因为首轮无果就放弃）；
+        - 后续轮次根据评估反馈（含建议的关键词）生成新的检索查询；
+        - 单个查询检索失败只跳过该查询，不中断整体流程；
+        - 普通向量知识库与（远程）多模态知识库都会用每个查询各自检索并合并；
+        - 最后用改写查询对合并结果整体重排，取 top_k。
         """
         meta = refs["meta"]
 
@@ -504,7 +563,7 @@ class Retriever:
         refs["graph_base"] = self.query_graph(query, history, refs)
         refs["web_search"] = self.query_web(query, history, refs)
 
-        # 多模态知识库（远程）：先以原始问题检索一次作为基线，后续每个子问题也会检索
+        # 多模态知识库（远程）：先以原始问题检索一次作为基线，后续每个查询也会检索
         use_mm = bool(meta.get("use_multimodal_kb"))
         multimodal_merged: list = []
         mm_meta: dict = {}
@@ -541,13 +600,13 @@ class Retriever:
                 "rounds": [],
                 "total_rounds": 0,
                 "final_recall": 0,
+                "assessment": {},
             }
             self._emit_progress(progress_cb, "未配置任何知识库检索源（普通知识库或多模态知识库），跳过子问题检索")
             return refs
 
         max_rounds = _coerce_int(config.get("multi_query_max_rounds"), 2, 1, 5)
         query_count = _coerce_int(config.get("multi_query_count"), 3, 1, 8)
-        recall_min = _coerce_int(config.get("multi_query_recall_min"), 3, 1, 50)
         top_k = _coerce_int(meta.get("topK"), 5, 1, 50)
 
         seen_queries = set()
@@ -555,14 +614,42 @@ class Retriever:
         merged = []
         all_raw = []
         round_log = []
+        assessment: dict = {}
+
+        def _combined():
+            """普通向量知识库 + 多模态的合并结果（用于评估与摘要）。"""
+            combined = self._dedupe_results(merged)
+            if use_mm:
+                combined = combined + self._dedupe_multimodal(multimodal_merged)
+            return combined
 
         def _recall_count():
-            """普通向量知识库与多模态知识库的总命中数（均已去重）。"""
-            mm_count = len(self._dedupe_multimodal(multimodal_merged)) if use_mm else 0
-            return len(merged) + mm_count
+            return len(self._dedupe_results(merged)) + (
+                len(self._dedupe_multimodal(multimodal_merged)) if use_mm else 0
+            )
+
+        def _snippets():
+            return "\n".join(
+                f"- {self._result_text(r)[:150]}" for r in _combined()[:8] if self._result_text(r)
+            ) or "（无检索结果）"
+
+        def _assess():
+            """让模型评估当前已检索内容的价值，返回评估字典。"""
+            result = self.assess_results(rw_query, _combined(), meta)
+            # 守卫：没有任何检索结果时，即使模型误判 has_value，也强制继续多检索几轮
+            if _recall_count() == 0:
+                result["has_value"] = False
+                result["need_more"] = True
+            return result
+
+        def _emit_assessment(a):
+            verdict = "检索到有价值内容" if a.get("has_value") else "未检索到足够有价值的内容"
+            self._emit_progress(progress_cb, f"  评估：{verdict}（{a.get('reason') or '无说明'}）")
+            if a.get("next_keywords"):
+                self._emit_progress(progress_cb, f"  建议下一轮检索关键词：{'、'.join(a['next_keywords'])}")
 
         def _retrieve(query_list):
-            """检索一组子问题：单个子问题失败只跳过该问题，累积已检索到的结果。
+            """检索一组查询：单个查询失败只跳过该查询，累积已检索到的结果。
 
             同时检索普通向量知识库与（远程）多模态知识库。
             """
@@ -574,21 +661,21 @@ class Retriever:
                     if raw:
                         all_raw.extend(raw)
                 except Exception as e:
-                    logger.error(f"多轮检索：子问题检索失败（{sq}）: {e}")
-                    self._emit_progress(progress_cb, f"  子问题「{sq}」检索失败，已跳过")
+                    logger.error(f"多轮检索：查询检索失败（{sq}）: {e}")
+                    self._emit_progress(progress_cb, f"  查询「{sq}」检索失败，已跳过")
                 if use_mm:
                     try:
                         mm_res = search_multimodal_remote(sq, meta)
                     except Exception as e:
                         logger.error(f"多轮检索：多模态检索失败（{sq}）: {e}")
-                        self._emit_progress(progress_cb, f"  子问题「{sq}」多模态检索失败，已跳过")
+                        self._emit_progress(progress_cb, f"  查询「{sq}」多模态检索失败，已跳过")
                         continue
                     multimodal_merged.extend(mm_res.get("results", []))
 
-        self._emit_progress(progress_cb, f"多轮检索启动：最多 {max_rounds} 轮，每轮由模型生成 {query_count} 个子问题")
+        self._emit_progress(progress_cb, f"多轮检索启动：最多 {max_rounds} 轮，每轮由模型生成 {query_count} 个检索查询")
 
-        # ---- 第1轮：改写后的查询 + 模型生成的子问题 ----
-        self._emit_progress(progress_cb, f"第1轮：模型生成 {query_count} 个检索子问题")
+        # ---- 第1轮：改写后的查询 + 模型生成的检索查询 ----
+        self._emit_progress(progress_cb, f"第1轮：模型生成 {query_count} 个检索查询")
         generated = self.generate_sub_queries(rw_query, history, meta, query_count)
         round1_queries = []
         for sq in [rw_query] + list(generated):
@@ -597,24 +684,35 @@ class Retriever:
             seen_queries.add(sq)
             round1_queries.append(sq)
             sub_queries.append(sq)
-            self._emit_progress(progress_cb, f"  检索子问题：{sq}")
+            self._emit_progress(progress_cb, f"  检索查询：{sq}")
         _retrieve(round1_queries)
         merged = self._dedupe_results(merged)
         all_raw = self._dedupe_results(all_raw)
         recall = _recall_count()
-        round_log.append({"round": 1, "queries": round1_queries, "recall": recall})
-        self._emit_progress(progress_cb, f"第1轮检索完成：{len(round1_queries)} 个子问题，命中 {recall} 条")
+        assessment = _assess()
+        round_log.append({
+            "round": 1,
+            "queries": round1_queries,
+            "recall": recall,
+            "has_value": assessment["has_value"],
+            "need_more": assessment["need_more"],
+            "next_keywords": assessment["next_keywords"],
+            "reason": assessment["reason"],
+        })
+        self._emit_progress(progress_cb, f"第1轮检索完成：{len(round1_queries)} 个查询，命中 {recall} 条")
+        _emit_assessment(assessment)
 
-        # ---- 后续轮次：召回不足时由模型依据部分结果生成新的子问题 ----
+        # ---- 后续轮次：模型评估决定是否继续检索 ----
         for round_no in range(2, max_rounds + 1):
-            if recall >= max(top_k, recall_min):
+            if assessment.get("has_value") or not assessment.get("need_more"):
+                self._emit_progress(progress_cb, "模型评估认为内容已足够，停止多轮检索")
                 break
             self._emit_progress(
                 progress_cb,
-                f"命中 {recall} 条，低于阈值 {max(top_k, recall_min)}，进入第{round_no}轮扩展检索",
+                f"第{round_no}轮：未检索到足够有价值的内容，根据评估继续检索",
             )
-            refined = self.generate_refined_queries(
-                rw_query, history, merged, sub_queries, meta, query_count
+            refined = self.generate_next_queries(
+                rw_query, _snippets(), assessment, sub_queries, meta, query_count
             )
             round_queries = []
             for sq in refined:
@@ -623,19 +721,29 @@ class Retriever:
                 seen_queries.add(sq)
                 round_queries.append(sq)
                 sub_queries.append(sq)
-                self._emit_progress(progress_cb, f"  第{round_no}轮 检索子问题：{sq}")
+                self._emit_progress(progress_cb, f"  第{round_no}轮 检索查询：{sq}")
             if not round_queries:
-                self._emit_progress(progress_cb, "模型未生成新的子问题，停止多轮检索")
+                self._emit_progress(progress_cb, "模型未生成新的检索查询，停止多轮检索")
                 break
             _retrieve(round_queries)
             merged = self._dedupe_results(merged)
             all_raw = self._dedupe_results(all_raw)
             recall = _recall_count()
-            round_log.append({"round": round_no, "queries": round_queries, "recall": recall})
+            assessment = _assess()
+            round_log.append({
+                "round": round_no,
+                "queries": round_queries,
+                "recall": recall,
+                "has_value": assessment["has_value"],
+                "need_more": assessment["need_more"],
+                "next_keywords": assessment["next_keywords"],
+                "reason": assessment["reason"],
+            })
             self._emit_progress(
                 progress_cb,
-                f"第{round_no}轮检索完成：新增 {len(round_queries)} 个子问题，累计命中 {recall} 条",
+                f"第{round_no}轮检索完成：新增 {len(round_queries)} 个查询，累计命中 {recall} 条",
             )
+            _emit_assessment(assessment)
 
         # ---- 整体重排 + 取 top_k（与检索实际所用的改写查询保持一致）----
         merged = self._final_rerank(rw_query, merged, meta)
@@ -669,10 +777,12 @@ class Retriever:
             "rounds": round_log,
             "total_rounds": len(round_log),
             "final_recall": len(final),
+            "assessment": assessment,
         }
+        verdict = "，模型认为内容足够" if assessment.get("has_value") else "，模型未确认检索到足够有价值的内容"
         self._emit_progress(
             progress_cb,
-            f"多轮检索完成：共 {len(sub_queries)} 个子问题 / {len(round_log)} 轮，最终上下文 {len(final)} 条",
+            f"多轮检索完成：共 {len(sub_queries)} 个查询 / {len(round_log)} 轮，最终上下文 {len(final)} 条{verdict}",
         )
         return refs
 

@@ -141,6 +141,37 @@
             <p>当前对话没有多模态知识库检索数据</p>
           </div>
         </a-tab-pane>
+
+        <!-- 多轮检索过程 -->
+        <a-tab-pane v-if="hasMultiRoundData" key="multiRound" tab="多轮检索">
+          <div class="multi-round-list">
+            <div v-for="round in latestRefs.multi_round.rounds" :key="round.round" class="multi-round-round">
+              <div class="round-header">
+                <span class="round-badge">第 {{ round.round }} 轮</span>
+                <span class="round-recall">命中 {{ round.recall }} 条</span>
+                <span class="round-verdict" :class="round.has_value ? 'verdict-ok' : 'verdict-no'">
+                  {{ round.has_value ? '✓ 有价值' : '✗ 无价值' }}
+                </span>
+              </div>
+              <div class="round-queries">
+                <span v-for="q in round.queries" :key="q" class="query-chip">{{ q }}</span>
+              </div>
+              <div v-if="round.reason" class="round-reason">{{ round.reason }}</div>
+              <div v-if="round.next_keywords && round.next_keywords.length" class="round-keywords">
+                <strong>下一轮建议检索：</strong>{{ round.next_keywords.join('、') }}
+              </div>
+            </div>
+            <div class="multi-round-final">
+              共 {{ latestRefs.multi_round.total_rounds }} 轮 / {{ latestRefs.multi_round.sub_queries.length }} 个查询
+              <template v-if="latestRefs.multi_round.assessment && latestRefs.multi_round.assessment.has_value">
+                — 模型确认检索到足够有价值的内容
+              </template>
+              <template v-else>
+                — 模型未确认检索到足够有价值的内容
+              </template>
+            </div>
+          </div>
+        </a-tab-pane>
       </a-tabs>
     </div>
   </div>
@@ -229,6 +260,15 @@ const hasKnowledgeBaseData = computed(() => {
   }
 })
 
+const hasMultiRoundData = computed(() => {
+  try {
+    const mr = props.latestRefs?.multi_round
+    return !!(mr && Array.isArray(mr.rounds) && mr.rounds.length > 0)
+  } catch (e) {
+    return false
+  }
+})
+
 const hasMultimodalKnowledgeBaseData = computed(() => {
   try {
     const refs = props.latestRefs?.multimodal_knowledge_base
@@ -308,7 +348,8 @@ watch(() => props.visible, (newValue) => {
       (graphRetrievalEnabled.value && activeTab.value === 'graph' && hasGraphData.value) ||
       (activeTab.value === 'webSearch' && hasWebSearchData.value) ||
       (knowledgeRetrievalEnabled.value && activeTab.value === 'knowledgeBase' && hasKnowledgeBaseData.value) ||
-      (knowledgeRetrievalEnabled.value && activeTab.value === 'multimodalKnowledgeBase' && hasMultimodalKnowledgeBaseData.value);
+      (knowledgeRetrievalEnabled.value && activeTab.value === 'multimodalKnowledgeBase' && hasMultimodalKnowledgeBaseData.value) ||
+      (activeTab.value === 'multiRound' && hasMultiRoundData.value);
 
     if (!currentTabValid) {
       console.log('Current tab is invalid, finding first available tab');
@@ -332,6 +373,9 @@ watch(() => props.visible, (newValue) => {
         if (Object.keys(groupedMultimodalResults.value).length > 0) {
           activeMultimodalFiles.value = [Object.keys(groupedMultimodalResults.value)[0]];
         }
+      } else if (hasMultiRoundData.value) {
+        console.log('Selected multiRound tab');
+        activeTab.value = 'multiRound';
       } else {
         console.log('No valid tabs available');
       }
@@ -377,7 +421,8 @@ const setActiveTab = (tab) => {
   if ((tab === 'graph' && hasGraphData.value) ||
       (tab === 'webSearch' && hasWebSearchData.value) ||
       (tab === 'knowledgeBase' && hasKnowledgeBaseData.value) ||
-      (tab === 'multimodalKnowledgeBase' && hasMultimodalKnowledgeBaseData.value)) {
+      (tab === 'multimodalKnowledgeBase' && hasMultimodalKnowledgeBaseData.value) ||
+      (tab === 'multiRound' && hasMultiRoundData.value)) {
     console.log('Setting activeTab to:', tab);
     activeTab.value = tab;
     if (tab === 'multimodalKnowledgeBase' && Object.keys(groupedMultimodalResults.value).length > 0) {
@@ -396,6 +441,9 @@ const setActiveTab = (tab) => {
     } else if (tab === 'multimodalKnowledgeBase' && props.latestRefs.multimodal_knowledge_base) {
       console.log('Forcing multimodalKnowledgeBase tab even though hasMultimodalKnowledgeBaseData is false');
       activeTab.value = 'multimodalKnowledgeBase';
+    } else if (tab === 'multiRound' && props.latestRefs.multi_round) {
+      console.log('Forcing multiRound tab even though hasMultiRoundData is false');
+      activeTab.value = 'multiRound';
     } else if (tab === 'graph' && props.latestRefs.graph_base) {
       console.log('Forcing graph tab even though hasGraphData is false');
       activeTab.value = 'graph';
@@ -754,6 +802,88 @@ defineExpose({
     .status-error {
       color: var(--error-color);
       font-weight: 600;
+    }
+  }
+
+  // 多轮检索过程样式
+  .multi-round-list {
+    .multi-round-round {
+      border: 1px solid var(--gray-200);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+      background: var(--surface-raised);
+
+      .round-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+
+        .round-badge {
+          background: var(--main-10);
+          color: var(--main-600);
+          border-radius: 4px;
+          padding: 2px 8px;
+          font-weight: 600;
+          font-size: 13px;
+        }
+
+        .round-recall {
+          font-size: 13px;
+          color: var(--gray-700);
+        }
+
+        .round-verdict {
+          font-size: 13px;
+          font-weight: 600;
+
+          &.verdict-ok {
+            color: #52c41a;
+          }
+
+          &.verdict-no {
+            color: var(--error-color);
+          }
+        }
+      }
+
+      .round-queries {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 8px;
+
+        .query-chip {
+          background: var(--gray-100);
+          border: 1px solid var(--gray-200);
+          border-radius: 10px;
+          padding: 2px 8px;
+          font-size: 12px;
+          color: var(--gray-800);
+        }
+      }
+
+      .round-reason {
+        font-size: 13px;
+        color: var(--text-secondary);
+        margin-bottom: 4px;
+        word-break: break-word;
+      }
+
+      .round-keywords {
+        font-size: 13px;
+        color: var(--gray-700);
+        word-break: break-word;
+      }
+    }
+
+    .multi-round-final {
+      font-size: 13px;
+      color: var(--text-secondary);
+      text-align: center;
+      padding: 8px 0;
     }
   }
 
