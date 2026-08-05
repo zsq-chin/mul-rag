@@ -411,6 +411,26 @@ class Retriever:
             out.append(r)
         return out
 
+    @staticmethod
+    def _dedupe_multimodal(results):
+        """按 (fileId, page, text) 对多模态检索结果去重，保持原始顺序。"""
+        seen = set()
+        out = []
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            text = str(r.get("text") or "").strip()
+            key = (
+                str(r.get("fileId") or r.get("file_id") or ""),
+                str(r.get("page") or ""),
+                text,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(r)
+        return out
+
     def _kb_query(self, sub_query, meta):
         """针对单个子问题执行一次知识库检索。
 
@@ -474,24 +494,46 @@ class Retriever:
         - 第1轮：改写+生成 count 个子问题，并始终保留改写后的查询本身参与检索；
         - 后续轮次：若合并命中数低于阈值，由模型依据部分结果生成新的子问题再次检索；
         - 单个子问题检索失败只跳过该子问题，不中断整体流程；
+        - 普通向量知识库与（远程）多模态知识库都会用每个子问题各自检索并合并；
         - 最后用检索实际所用的改写查询对合并结果整体重排，取 top_k。
         """
         meta = refs["meta"]
 
-        # 图/网络/多模态检索仍用原始问题执行一次（多轮扩展只作用于知识库分块检索）
+        # 图/网络检索仍用原始问题执行一次
         refs["entities"] = self.reco_entities(query, history, refs)
         refs["graph_base"] = self.query_graph(query, history, refs)
         refs["web_search"] = self.query_web(query, history, refs)
-        refs["multimodal_knowledge_base"] = self.query_multimodal_knowledgebase(query, history, refs)
+
+        # 多模态知识库（远程）：先以原始问题检索一次作为基线，后续每个子问题也会检索
+        use_mm = bool(meta.get("use_multimodal_kb"))
+        multimodal_merged: list = []
+        mm_meta: dict = {}
+        if use_mm:
+            try:
+                base_mm = search_multimodal_remote(query, meta)
+            except Exception as e:
+                logger.error(f"多模态知识库检索失败: {e}")
+                base_mm = {"results": [], "message": f"多模态知识库检索失败: {e}"}
+            multimodal_merged.extend(base_mm.get("results", []))
+            mm_meta = {k: base_mm.get(k) for k in ("kb_id", "kb_name", "file_id", "base_url", "message", "status")}
 
         rw_query = self.rewrite_query(query, history, refs)
 
-        if not config.enable_knowledge_base or not meta.get("db_id"):
+        if (not config.enable_knowledge_base or not meta.get("db_id")) and not use_mm:
             refs["knowledge_base"] = {
                 "results": [],
                 "all_results": [],
                 "rw_query": rw_query,
                 "message": "知识库未启用、或未指定知识库、或知识库不存在",
+            }
+            refs["multimodal_knowledge_base"] = {
+                "results": [],
+                "message": "",
+                "kb_id": None,
+                "kb_name": None,
+                "file_id": None,
+                "base_url": None,
+                "status": "",
             }
             refs["multi_round"] = {
                 "mode": "multi_round",
@@ -500,7 +542,7 @@ class Retriever:
                 "total_rounds": 0,
                 "final_recall": 0,
             }
-            self._emit_progress(progress_cb, "知识库未启用或未指定知识库，跳过子问题检索")
+            self._emit_progress(progress_cb, "未配置任何知识库检索源（普通知识库或多模态知识库），跳过子问题检索")
             return refs
 
         max_rounds = _coerce_int(config.get("multi_query_max_rounds"), 2, 1, 5)
@@ -514,19 +556,34 @@ class Retriever:
         all_raw = []
         round_log = []
 
+        def _recall_count():
+            """普通向量知识库与多模态知识库的总命中数（均已去重）。"""
+            mm_count = len(self._dedupe_multimodal(multimodal_merged)) if use_mm else 0
+            return len(merged) + mm_count
+
         def _retrieve(query_list):
-            """检索一组子问题：单个子问题失败只跳过该问题，累积已检索到的结果。"""
+            """检索一组子问题：单个子问题失败只跳过该问题，累积已检索到的结果。
+
+            同时检索普通向量知识库与（远程）多模态知识库。
+            """
             for sq in query_list:
                 try:
                     results, raw = self._kb_query(sq, meta)
+                    if results:
+                        merged.extend(results)
+                    if raw:
+                        all_raw.extend(raw)
                 except Exception as e:
                     logger.error(f"多轮检索：子问题检索失败（{sq}）: {e}")
                     self._emit_progress(progress_cb, f"  子问题「{sq}」检索失败，已跳过")
-                    continue
-                if results:
-                    merged.extend(results)
-                if raw:
-                    all_raw.extend(raw)
+                if use_mm:
+                    try:
+                        mm_res = search_multimodal_remote(sq, meta)
+                    except Exception as e:
+                        logger.error(f"多轮检索：多模态检索失败（{sq}）: {e}")
+                        self._emit_progress(progress_cb, f"  子问题「{sq}」多模态检索失败，已跳过")
+                        continue
+                    multimodal_merged.extend(mm_res.get("results", []))
 
         self._emit_progress(progress_cb, f"多轮检索启动：最多 {max_rounds} 轮，每轮由模型生成 {query_count} 个子问题")
 
@@ -544,16 +601,17 @@ class Retriever:
         _retrieve(round1_queries)
         merged = self._dedupe_results(merged)
         all_raw = self._dedupe_results(all_raw)
-        round_log.append({"round": 1, "queries": round1_queries, "recall": len(merged)})
-        self._emit_progress(progress_cb, f"第1轮检索完成：{len(round1_queries)} 个子问题，命中 {len(merged)} 条")
+        recall = _recall_count()
+        round_log.append({"round": 1, "queries": round1_queries, "recall": recall})
+        self._emit_progress(progress_cb, f"第1轮检索完成：{len(round1_queries)} 个子问题，命中 {recall} 条")
 
         # ---- 后续轮次：召回不足时由模型依据部分结果生成新的子问题 ----
         for round_no in range(2, max_rounds + 1):
-            if len(merged) >= max(top_k, recall_min):
+            if recall >= max(top_k, recall_min):
                 break
             self._emit_progress(
                 progress_cb,
-                f"命中 {len(merged)} 条，低于阈值 {max(top_k, recall_min)}，进入第{round_no}轮扩展检索",
+                f"命中 {recall} 条，低于阈值 {max(top_k, recall_min)}，进入第{round_no}轮扩展检索",
             )
             refined = self.generate_refined_queries(
                 rw_query, history, merged, sub_queries, meta, query_count
@@ -572,10 +630,11 @@ class Retriever:
             _retrieve(round_queries)
             merged = self._dedupe_results(merged)
             all_raw = self._dedupe_results(all_raw)
-            round_log.append({"round": round_no, "queries": round_queries, "recall": len(merged)})
+            recall = _recall_count()
+            round_log.append({"round": round_no, "queries": round_queries, "recall": recall})
             self._emit_progress(
                 progress_cb,
-                f"第{round_no}轮检索完成：新增 {len(round_queries)} 个子问题，累计命中 {len(merged)} 条",
+                f"第{round_no}轮检索完成：新增 {len(round_queries)} 个子问题，累计命中 {recall} 条",
             )
 
         # ---- 整体重排 + 取 top_k（与检索实际所用的改写查询保持一致）----
@@ -588,6 +647,22 @@ class Retriever:
             "rw_query": rw_query,
             "message": "",
         }
+        if use_mm:
+            refs["multimodal_knowledge_base"] = {
+                **mm_meta,
+                "results": self._dedupe_multimodal(multimodal_merged),
+                "message": mm_meta.get("message") or "",
+            }
+        else:
+            refs["multimodal_knowledge_base"] = {
+                "results": [],
+                "message": "",
+                "kb_id": None,
+                "kb_name": None,
+                "file_id": None,
+                "base_url": None,
+                "status": "",
+            }
         refs["multi_round"] = {
             "mode": "multi_round",
             "sub_queries": sub_queries,

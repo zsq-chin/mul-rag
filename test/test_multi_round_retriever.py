@@ -52,7 +52,7 @@ _make_module("src.utils.logging_config", logger=_logger)
 _make_module("src.utils", logger=_logger)
 _make_module("src.models.rerank_model", get_reranker=MagicMock())
 _make_module("src.core.operators", HyDEOperator=MagicMock())
-_make_module(
+_mm_remote = _make_module(
     "server.utils.multimodal_remote",
     format_multimodal_context=MagicMock(return_value=""),
     search_multimodal_remote=MagicMock(return_value={"results": [], "message": ""}),
@@ -163,6 +163,20 @@ def _res(i, text=None, file_id="f1"):
         "distance": 0.9,
         "entity": {"text": text if text is not None else f"chunk {i}", "file_id": file_id},
         "file": {"file_id": file_id, "filename": f"{file_id}.docx", "file_type": "docx"},
+    }
+
+
+def _mm_res(i, text, file_id="f1", page=1):
+    return {
+        "id": i,
+        "rank": i,
+        "fileId": file_id,
+        "fileName": f"{file_id}.pdf",
+        "page": page,
+        "score": 0.9,
+        "contentType": "text",
+        "images": [],
+        "text": text,
     }
 
 
@@ -414,6 +428,63 @@ class MultiRoundRetrievalTests(unittest.TestCase):
         self.assertIn("知识库未启用", refs["knowledge_base"]["message"])
         self.assertEqual(refs["multi_round"]["sub_queries"], [])
         self.assertEqual(len(kb.calls), 0)
+
+    def test_multimodal_subqueries_retrieve_remote_kb(self):
+        """多轮模式下每个子问题都应调用远程多模态知识库检索并合并去重。"""
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2"]))])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")], "q1": [_res(1, "a")]})
+        r, kb = _make_retriever(kb, model)
+
+        mm_calls = []
+
+        def _fake_mm(query, meta=None):
+            mm_calls.append(query)
+            mapping = {
+                "原始问题": [_mm_res(1, "mm-orig")],
+                "q1": [_mm_res(2, "mm-q1")],
+                "q2": [_mm_res(2, "mm-q1")],  # 与 q1 文本重复，验证去重
+            }
+            return {
+                "results": mapping.get(query, []),
+                "message": "",
+                "kb_id": "kb",
+                "kb_name": "mm",
+                "file_id": None,
+                "base_url": "http://remote",
+                "status": "ok",
+            }
+
+        _mm_remote.search_multimodal_remote.side_effect = _fake_mm
+
+        refs = r.multi_round_retrieval(
+            "原始问题", [], {"query": "原始问题", "history": [], "meta": _meta(use_multimodal_kb=True, topK=10)},
+        )
+        # 改写查询本身 + 每个生成的子问题都触发了一次远程多模态检索
+        self.assertEqual(set(mm_calls), {"原始问题", "q1", "q2"})
+        results = refs["multimodal_knowledge_base"]["results"]
+        self.assertEqual([x["text"] for x in results], ["mm-orig", "mm-q1"])
+        self.assertEqual(refs["multimodal_knowledge_base"]["kb_id"], "kb")
+
+    def test_multimodal_failure_does_not_abort(self):
+        """远程多模态检索失败只跳过该子问题，不影响其它子问题与整体流程。"""
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2"]))])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")], "q1": [_res(1, "a")]})
+        r, kb = _make_retriever(kb, model)
+
+        def _flaky_mm(query, meta=None):
+            if query == "q1":
+                raise ConnectionError("remote down")
+            return {"results": [_mm_res(1, f"mm-{query}")], "message": "", "kb_id": "kb", "kb_name": "mm"}
+
+        _mm_remote.search_multimodal_remote.side_effect = _flaky_mm
+
+        refs = r.multi_round_retrieval(
+            "原始问题", [], {"query": "原始问题", "history": [], "meta": _meta(use_multimodal_kb=True, topK=10)},
+        )
+        texts = [x["text"] for x in refs["multimodal_knowledge_base"]["results"]]
+        self.assertIn("mm-原始问题", texts)
+        self.assertIn("mm-q2", texts)
+        self.assertNotIn("mm-q1", texts)
 
 
 if __name__ == "__main__":
