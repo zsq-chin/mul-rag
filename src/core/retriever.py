@@ -1,3 +1,6 @@
+import json
+import re
+import hashlib
 import traceback
 
 from src import config, knowledge_base, graph_base
@@ -61,9 +64,14 @@ class Retriever:
             from src.utils.web_search_bocha import WebSearcher
             self.web_searcher = WebSearcher()
 
-    def retrieval(self, query, history, meta):
+    def retrieval(self, query, history, meta, progress_cb=None):
         refs = {"query": query, "history": history, "meta": meta}
         refs["model_name"] = config.model_name
+
+        # 多轮检索：由模型多次生成检索子问题，逐个子问题检索并合并结果
+        if meta.get("retrieval_mode") == "multi_round":
+            return self.multi_round_retrieval(query, history, refs, progress_cb)
+
         refs["entities"] = self.reco_entities(query, history, refs)
         refs["knowledge_base"] = self.query_knowledgebase(query, history, refs)
         refs["graph_base"] = self.query_graph(query, history, refs)
@@ -262,6 +270,337 @@ class Retriever:
 
         return response
 
+    # ==== 多轮检索 (MultiRound / MultiQuery) ====
+
+    def _emit_progress(self, progress_cb, message):
+        """发送多轮检索进度消息，回调失败不影响主流程。"""
+        if progress_cb is not None:
+            try:
+                progress_cb(message)
+            except Exception:
+                pass
+        logger.info(message)
+
+    def _select_chat_model(self):
+        # 优先使用用户选定的模型（由 chat_router 在调用时注入），否则退回全局默认模型
+        if getattr(self, "_chat_model", None) is not None:
+            return self._chat_model
+        return select_model(model_provider=config.model_provider, model_name=config.model_name)
+
+    def _parse_query_list(self, text):
+        """解析模型输出的子问题列表：兼容 JSON 数组 / JSON 对象 / 带说明文字的 JSON / 逐行文本。"""
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        def _clean(items):
+            return [str(x).strip() for x in items if str(x).strip()]
+
+        # 去掉 ```json ... ``` 围栏
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+        # 1) 直接 JSON 解析（含空数组，需显式返回 []，不能落到逐行兜底）
+        data = None
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            data = None
+        if isinstance(data, list):
+            return _clean(data)
+        if isinstance(data, dict):
+            for key in ("questions", "queries", "sub_questions", "sub_queries", "results"):
+                if isinstance(data.get(key), list):
+                    return _clean(data[key])
+            return _clean([v for v in data.values() if isinstance(v, str)])
+
+        # 2) 模型常附带前后说明文字，先截取最外层 [..] / {..} 再解析
+        for start, end in (("[", "]"), ("{", "}")):
+            i, j = text.find(start), text.rfind(end)
+            if i != -1 and j > i:
+                candidate = text[i : j + 1]
+                try:
+                    data = json.loads(candidate)
+                    if isinstance(data, list):
+                        return _clean(data)
+                    if isinstance(data, dict):
+                        for key in ("questions", "queries", "sub_questions", "sub_queries", "results"):
+                            if isinstance(data.get(key), list):
+                                return _clean(data[key])
+                        return _clean([v for v in data.values() if isinstance(v, str)])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+        # 3) 逐行解析兜底：去除序号 / 列表符 / 引号，跳过 JSON 结构片段行
+        lines = []
+        for raw in text.splitlines():
+            line = raw.strip().lstrip("-*•").strip()
+            if not line:
+                continue
+            if re.match(r"^[\[{\"'“]", line) or line.endswith(("]", "}", ",", '"')):
+                continue
+            line = re.sub(r"^\d+[.)、:：]\s*", "", line)
+            line = line.strip().strip('"').strip("'")
+            if line and line not in lines:
+                lines.append(line)
+        return lines
+
+    def generate_sub_queries(self, query, history, meta, count):
+        """第1轮：由模型把用户问题改写成 count 个检索子问题。"""
+        from src.utils.prompts import multi_query_generation_prompt
+        model = self._select_chat_model()
+        history_questions = [entry["content"] for entry in history if entry.get("role") == "user"] if history else []
+        prompt = multi_query_generation_prompt.format(
+            question=query,
+            history=json.dumps(history_questions[-5:], ensure_ascii=False),
+            count=count,
+        )
+        try:
+            response = model.predict(prompt)
+            text = response.content if hasattr(response, "content") else str(response)
+            questions = self._parse_query_list(text)
+        except Exception as e:
+            logger.error(f"多轮检索：子问题生成失败: {e}")
+            questions = []
+        if not questions:
+            questions = [query]
+        return [q for q in questions if q][:count]
+
+    def generate_refined_queries(self, query, history, partial_results, existing_queries, meta, count):
+        """后续轮次：根据已有部分结果生成新的检索子问题，补充召回。"""
+        from src.utils.prompts import multi_query_refine_prompt
+        model = self._select_chat_model()
+        snippets = "\n".join(
+            f"- {(r.get('entity') or {}).get('text', '')[:120]}"
+            for r in partial_results[:8] if r.get("entity")
+        )
+        prompt = multi_query_refine_prompt.format(
+            question=query,
+            results=snippets or "（无）",
+            previous="\n".join(existing_queries) or "（无）",
+            count=count,
+        )
+        try:
+            response = model.predict(prompt)
+            text = response.content if hasattr(response, "content") else str(response)
+            questions = self._parse_query_list(text)
+        except Exception as e:
+            logger.error(f"多轮检索：扩展子问题生成失败: {e}")
+            questions = []
+        return [q for q in questions if q and q not in existing_queries][:count]
+
+    @staticmethod
+    def _dedupe_results(results):
+        """按 id 与文本签名去重，保持原始顺序。"""
+        seen_ids = set()
+        seen_sigs = set()
+        out = []
+        for r in results:
+            rid = r.get("id")
+            if rid is not None:
+                if rid in seen_ids:
+                    continue
+                seen_ids.add(rid)
+            entity = r.get("entity") or {}
+            text = entity.get("text") or ""
+            if text:
+                sig = hashlib.sha1(text.strip().encode("utf-8", "ignore")).hexdigest()
+                if sig in seen_sigs:
+                    continue
+                seen_sigs.add(sig)
+            out.append(r)
+        return out
+
+    def _kb_query(self, sub_query, meta):
+        """针对单个子问题执行一次知识库检索。
+
+        返回 ``(results, all_results)``：前者是经过距离/重排过滤后的结果，
+        后者是原始未过滤的候选集（用于对外暴露 all_results，与快速检索语义一致）。
+        """
+        db_id = meta.get("db_id")
+        if not db_id or not config.enable_knowledge_base:
+            return [], []
+        top_k = _coerce_int(meta.get("topK"), 5, 1, 50)
+        recall_top_k = max(top_k * 2, 10)
+        max_query_count = _coerce_int(meta.get("maxQueryCount"), 10, 1, 1000)
+        distance_threshold = _coerce_float(meta.get("distanceThreshold"), 0.5, -1.0, 1.0)
+        rerank_threshold = _coerce_float(meta.get("rerankThreshold"), 0.1, -1.0, 1.0)
+        query_result = knowledge_base.query(
+            query_text=sub_query,
+            db_id=db_id,
+            distance_threshold=distance_threshold,
+            rerank_threshold=rerank_threshold,
+            max_query_count=max(max_query_count, recall_top_k),
+            top_k=recall_top_k,
+        )
+        return query_result.get("results", []), query_result.get("all_results", [])
+
+    def _final_rerank(self, query, results, meta):
+        """对合并后的结果用检索所用查询做一次整体重排。
+
+        - 重排器开启时按 rerank_score 降序并过滤阈值；
+        - 重排器关闭时按已有 distance 降序，避免首个子问题的结果垄断 top_k。
+        """
+        if not results:
+            return results
+        if not config.enable_reranker:
+            results = sorted(
+                results, key=lambda x: x.get("distance", -1) or -1, reverse=True
+            )
+            return results
+        try:
+            reranker = get_reranker()
+            scored = [(i, r) for i, r in enumerate(results)
+                      if r.get("entity") and r["entity"].get("text")]
+            if not scored:
+                return results
+            idxs = [i for i, _ in scored]
+            texts = [r["entity"]["text"] for _, r in scored]
+            scores = reranker.compute_score([query, texts], normalize=False)
+            for pos, i in enumerate(idxs):
+                if pos < len(scores):
+                    results[i]["rerank_score"] = scores[pos]
+            results.sort(key=lambda x: x.get("rerank_score", -1), reverse=True)
+            threshold = _coerce_float(meta.get("rerankThreshold"), 0.1, -1.0, 1.0)
+            results = [r for r in results if r.get("rerank_score", -1) > threshold]
+        except Exception as e:
+            logger.error(f"多轮检索：最终重排失败: {e}")
+        return results
+
+    def multi_round_retrieval(self, query, history, refs, progress_cb=None):
+        """
+        多轮检索：由模型多次生成检索子问题，逐个子问题检索并合并结果。
+
+        - 第1轮：改写+生成 count 个子问题，并始终保留改写后的查询本身参与检索；
+        - 后续轮次：若合并命中数低于阈值，由模型依据部分结果生成新的子问题再次检索；
+        - 单个子问题检索失败只跳过该子问题，不中断整体流程；
+        - 最后用检索实际所用的改写查询对合并结果整体重排，取 top_k。
+        """
+        meta = refs["meta"]
+
+        # 图/网络/多模态检索仍用原始问题执行一次（多轮扩展只作用于知识库分块检索）
+        refs["entities"] = self.reco_entities(query, history, refs)
+        refs["graph_base"] = self.query_graph(query, history, refs)
+        refs["web_search"] = self.query_web(query, history, refs)
+        refs["multimodal_knowledge_base"] = self.query_multimodal_knowledgebase(query, history, refs)
+
+        rw_query = self.rewrite_query(query, history, refs)
+
+        if not config.enable_knowledge_base or not meta.get("db_id"):
+            refs["knowledge_base"] = {
+                "results": [],
+                "all_results": [],
+                "rw_query": rw_query,
+                "message": "知识库未启用、或未指定知识库、或知识库不存在",
+            }
+            refs["multi_round"] = {
+                "mode": "multi_round",
+                "sub_queries": [],
+                "rounds": [],
+                "total_rounds": 0,
+                "final_recall": 0,
+            }
+            self._emit_progress(progress_cb, "知识库未启用或未指定知识库，跳过子问题检索")
+            return refs
+
+        max_rounds = _coerce_int(config.get("multi_query_max_rounds"), 2, 1, 5)
+        query_count = _coerce_int(config.get("multi_query_count"), 3, 1, 8)
+        recall_min = _coerce_int(config.get("multi_query_recall_min"), 3, 1, 50)
+        top_k = _coerce_int(meta.get("topK"), 5, 1, 50)
+
+        seen_queries = set()
+        sub_queries = []
+        merged = []
+        all_raw = []
+        round_log = []
+
+        def _retrieve(query_list):
+            """检索一组子问题：单个子问题失败只跳过该问题，累积已检索到的结果。"""
+            for sq in query_list:
+                try:
+                    results, raw = self._kb_query(sq, meta)
+                except Exception as e:
+                    logger.error(f"多轮检索：子问题检索失败（{sq}）: {e}")
+                    self._emit_progress(progress_cb, f"  子问题「{sq}」检索失败，已跳过")
+                    continue
+                if results:
+                    merged.extend(results)
+                if raw:
+                    all_raw.extend(raw)
+
+        self._emit_progress(progress_cb, f"多轮检索启动：最多 {max_rounds} 轮，每轮由模型生成 {query_count} 个子问题")
+
+        # ---- 第1轮：改写后的查询 + 模型生成的子问题 ----
+        self._emit_progress(progress_cb, f"第1轮：模型生成 {query_count} 个检索子问题")
+        generated = self.generate_sub_queries(rw_query, history, meta, query_count)
+        round1_queries = []
+        for sq in [rw_query] + list(generated):
+            if not sq or sq in seen_queries:
+                continue
+            seen_queries.add(sq)
+            round1_queries.append(sq)
+            sub_queries.append(sq)
+            self._emit_progress(progress_cb, f"  检索子问题：{sq}")
+        _retrieve(round1_queries)
+        merged = self._dedupe_results(merged)
+        all_raw = self._dedupe_results(all_raw)
+        round_log.append({"round": 1, "queries": round1_queries, "recall": len(merged)})
+        self._emit_progress(progress_cb, f"第1轮检索完成：{len(round1_queries)} 个子问题，命中 {len(merged)} 条")
+
+        # ---- 后续轮次：召回不足时由模型依据部分结果生成新的子问题 ----
+        for round_no in range(2, max_rounds + 1):
+            if len(merged) >= max(top_k, recall_min):
+                break
+            self._emit_progress(
+                progress_cb,
+                f"命中 {len(merged)} 条，低于阈值 {max(top_k, recall_min)}，进入第{round_no}轮扩展检索",
+            )
+            refined = self.generate_refined_queries(
+                rw_query, history, merged, sub_queries, meta, query_count
+            )
+            round_queries = []
+            for sq in refined:
+                if not sq or sq in seen_queries:
+                    continue
+                seen_queries.add(sq)
+                round_queries.append(sq)
+                sub_queries.append(sq)
+                self._emit_progress(progress_cb, f"  第{round_no}轮 检索子问题：{sq}")
+            if not round_queries:
+                self._emit_progress(progress_cb, "模型未生成新的子问题，停止多轮检索")
+                break
+            _retrieve(round_queries)
+            merged = self._dedupe_results(merged)
+            all_raw = self._dedupe_results(all_raw)
+            round_log.append({"round": round_no, "queries": round_queries, "recall": len(merged)})
+            self._emit_progress(
+                progress_cb,
+                f"第{round_no}轮检索完成：新增 {len(round_queries)} 个子问题，累计命中 {len(merged)} 条",
+            )
+
+        # ---- 整体重排 + 取 top_k（与检索实际所用的改写查询保持一致）----
+        merged = self._final_rerank(rw_query, merged, meta)
+        final = merged[:top_k]
+
+        refs["knowledge_base"] = {
+            "results": final,
+            "all_results": all_raw,
+            "rw_query": rw_query,
+            "message": "",
+        }
+        refs["multi_round"] = {
+            "mode": "multi_round",
+            "sub_queries": sub_queries,
+            "rounds": round_log,
+            "total_rounds": len(round_log),
+            "final_recall": len(final),
+        }
+        self._emit_progress(
+            progress_cb,
+            f"多轮检索完成：共 {len(sub_queries)} 个子问题 / {len(round_log)} 轮，最终上下文 {len(final)} 条",
+        )
+        return refs
+
     def rewrite_query(self, query, history, refs):
         """重写查询"""
         model_provider = config.model_provider
@@ -305,7 +644,12 @@ class Retriever:
 
         return entities
 
-    def __call__(self, query, history, meta):
-        refs = self.retrieval(query, history, meta)
-        query = self.construct_query(query, refs, meta)
-        return query, refs
+    def __call__(self, query, history, meta, progress_cb=None, chat_model=None):
+        # 注入用户选定的模型，供多轮检索的子问题生成使用（与回答模型保持一致）
+        self._chat_model = chat_model
+        try:
+            refs = self.retrieval(query, history, meta, progress_cb)
+            query = self.construct_query(query, refs, meta)
+            return query, refs
+        finally:
+            self._chat_model = None

@@ -91,6 +91,20 @@
               :allow-personal="true"
               @select-model="handleModelSelect"
             />
+            <div class="opt-item retrieval-mode" v-if="knowledgeRetrievalEnabled">
+              <span
+                class="retrieval-mode__item"
+                :class="{ active: meta.retrieval_mode === 'quick' }"
+                @click="meta.retrieval_mode = 'quick'"
+                title="保持原有检索逻辑，直接检索"
+              >快速检索</span>
+              <span
+                class="retrieval-mode__item"
+                :class="{ active: meta.retrieval_mode === 'multi_round', disabled: noRetrievalSource }"
+                @click="!noRetrievalSource && (meta.retrieval_mode = 'multi_round')"
+                :title="noRetrievalSource ? '请先选择知识库或开启联网/图谱检索' : '由模型多次生成检索子问题，逐个子问题检索并合并结果'"
+              >多轮检索</span>
+            </div>
             <div
               :class="{'switch': true, 'opt-item': true, 'active': meta.use_web}"
               v-if="configStore.config.enable_web_search"
@@ -251,6 +265,7 @@ const meta = reactive({
   summary_title: false,
   history_round: 20,
   db_id: null,
+  retrieval_mode: 'quick', // 'quick' 快速检索（原有逻辑） | 'multi_round' 多轮检索（模型多次生成子问题检索）
   fontSize: 'default',
   wideScreen: false,
 })
@@ -260,6 +275,10 @@ const selectedMultimodalKb = computed(() =>
 )
 const graphRetrievalEnabled = computed(() => canUseGraph(userStore.userRole))
 const knowledgeRetrievalEnabled = computed(() => canUseKnowledgeRetrieval(userStore.userRole))
+// 是否没有任何检索来源（未选知识库且未开启联网/图谱/多模态）——此时多轮检索无意义，置灰
+const noRetrievalSource = computed(() =>
+  meta.selectedKB === null && !meta.use_web && !meta.use_graph && !meta.use_multimodal_kb
+)
 const messageRefActions = computed(() => {
   const actions = ['copy', 'regenerate', 'webSearch', 'knowledgeBase', 'multimodalKnowledgeBase']
   return graphRetrievalEnabled.value ? [...actions, 'subGraph'] : actions
@@ -1193,6 +1212,54 @@ const handleQuestionClick = (question) => {
       justify-content: center;
       align-items: center;
       gap: 4px;
+    }
+
+    // 快速/多轮检索切换
+    // 用更高的选择器优先级覆盖 MessageInputComponent :deep(.opt-item) 的灰边框与 wrapper 级 hover
+    .opt-item.retrieval-mode {
+      padding: 3px;
+      border: none;
+      border-radius: 14px;
+      background-color: transparent;
+      flex-wrap: nowrap;
+
+      &:hover {
+        background-color: transparent;
+      }
+
+      .retrieval-mode__item {
+        padding: 2px 10px;
+        border-radius: 10px;
+        cursor: pointer;
+        font-size: 13px;
+        line-height: 22px;
+        color: var(--gray-700);
+        white-space: nowrap;
+        transition: all 0.2s ease;
+
+        &:hover {
+          background-color: var(--main-10);
+          color: var(--main-600);
+        }
+
+        &.active {
+          color: var(--main-600);
+          border: 1px solid var(--main-500);
+          background-color: var(--main-10);
+        }
+
+        &.disabled {
+          color: var(--gray-400);
+          cursor: not-allowed;
+          border: none;
+          background-color: transparent;
+
+          &:hover {
+            background-color: transparent;
+            color: var(--gray-400);
+          }
+        }
+      }
     }
 
     .note {

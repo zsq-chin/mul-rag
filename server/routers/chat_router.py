@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import functools
+import queue
 import traceback
 import uuid
 from datetime import datetime # [新增] 导入 datetime
@@ -334,13 +335,29 @@ async def chat_post(
 
             try:
                 loop = asyncio.get_running_loop()
+                # 多轮检索通过线程安全的 Queue 把进度消息回传，由事件循环边等待边转发
+                progress_q = queue.Queue()
                 async with retrieval_gate:
-                    modified_query, refs = await loop.run_in_executor(
+                    future = loop.run_in_executor(
                         executor,
                         functools.partial(
-                            retriever, modified_query, history_manager.messages, meta
+                            retriever, modified_query, history_manager.messages, meta, progress_q.put, model
                         ),
                     )
+                    while not future.done():
+                        try:
+                            progress_msg = progress_q.get_nowait()
+                        except queue.Empty:
+                            await asyncio.sleep(0.05)
+                            continue
+                        if progress_msg:
+                            yield make_chunk(status="searching", message=progress_msg)
+                    modified_query, refs = await future
+                    # 检索完成后再清空一次队列，避免最后一条进度消息在 future 完成瞬间被丢弃
+                    while not progress_q.empty():
+                        progress_msg = progress_q.get_nowait()
+                        if progress_msg:
+                            yield make_chunk(status="searching", message=progress_msg)
             except Exception as e:
                 logger.error(f"Retriever error: {e}, {traceback.format_exc()}")
                 yield make_chunk(message=f"Retriever error: {e}", status="error")

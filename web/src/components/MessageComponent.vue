@@ -29,7 +29,7 @@
 
       <!-- 检索中状态 (ChatComponent特有) -->
       <div v-else-if="message.status === 'searching' && isProcessing" class="searching-msg">
-        <i>正在检索……</i>
+        <i>{{ message.message || '正在检索……' }}</i>
       </div>
 
       <!-- 生成中状态 (ChatComponent特有) -->

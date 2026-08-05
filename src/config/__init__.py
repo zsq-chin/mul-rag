@@ -164,6 +164,10 @@ class Config(SimpleConfig):
         self.add_item("graph_max_entities", default=5, des="图谱查询最大实体数")
         self.add_item("graph_max_relations", default=10, des="图谱查询最大关系数")
         self.add_item("graph_context_max_chars", default=2000, des="图谱上下文最大字符数")
+        # 多轮检索配置
+        self.add_item("multi_query_count", default=3, des="多轮检索：每轮由模型生成的检索子问题数量")
+        self.add_item("multi_query_max_rounds", default=2, des="多轮检索：最大检索轮数")
+        self.add_item("multi_query_recall_min", default=3, des="多轮检索：命中数低于该值时触发下一轮扩展检索")
         ### <<< 默认配置结束
 
         self.load()
