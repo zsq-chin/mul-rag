@@ -1,43 +1,55 @@
 import { apiGet, apiPost } from './base'
 
 /**
- * 问答统计社区 API 模块
- * 对应后端 statistics_router.py 的接口
+ * 问答统计 API 模块
+ * 对应后端 statistics_router.py 的接口。
+ * 注意：所有接口均要求 superadmin 权限，调用时一律带上认证头。
  */
 
-// 1. 获取热门问题排行榜
+// 1. 获取统计数据总览（真实问答数据聚合）
+// 对应后端: GET /api/statistics/overview?days=14
+export const getStatisticsOverview = (params = {}) => {
+  const days = params.days || 14
+  return apiGet(`/api/statistics/overview?days=${days}`, {}, true)
+}
+
+// 2. 把真实热门问题同步进社区 questions 表
+// 对应后端: POST /api/statistics/sync-questions
+export const syncQuestions = () => {
+  return apiPost('/api/statistics/sync-questions', {}, {}, true)
+}
+
+// 3. 获取热门问题排行榜（社区板块，由 sync-questions 填充）
 // 对应后端: GET /api/statistics/top-questions
 export const getTopQuestions = (params = {}) => {
-  // 处理参数，默认 limit 为 10
   const limit = params.limit || 10
-  return apiGet(`/api/statistics/top-questions?limit=${limit}`)
+  return apiGet(`/api/statistics/top-questions?limit=${limit}`, {}, true)
 }
 
-// 2. 获取某个问题的讨论列表
+// 4. 获取某个问题的讨论列表
 // 对应后端: GET /api/statistics/questions/{questionId}/discussions
 export const getQuestionDiscussions = (questionId) => {
-  return apiGet(`/api/statistics/questions/${questionId}/discussions`)
+  return apiGet(`/api/statistics/questions/${questionId}/discussions`, {}, true)
 }
 
-// 3. 发布讨论/评论
+// 5. 发布讨论/评论
 // 对应后端: POST /api/statistics/questions/{questionId}/discussions
-// requiresAuth = true (第三个参数)，表示需要登录才能评论
 export const createDiscussion = (questionId, data) => {
   return apiPost(
-    `/api/statistics/questions/${questionId}/discussions`, 
-    data, 
-    {}, 
+    `/api/statistics/questions/${questionId}/discussions`,
+    data,
+    {},
     true // 需要认证
   )
 }
 
-// 4. 发布求助
+// 6. 发布求助
 // 对应后端: POST /api/statistics/help-requests
 export const createHelpRequest = (data) => {
   return apiPost(
-    `/api/statistics/help-requests`, 
-    data, 
-    {}, 
+    `/api/statistics/help-requests`,
+    data,
+    {},
     true // 需要认证
   )
 }
