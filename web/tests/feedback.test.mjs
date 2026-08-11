@@ -18,6 +18,10 @@ const localFeatures = readFileSync(
   new URL('../src/apis/local_features.js', import.meta.url),
   'utf8',
 )
+const statisticsView = readFileSync(
+  new URL('../src/views/AnswerStatistics.vue', import.meta.url),
+  'utf8',
+)
 
 test('feedback API calls carry auth and hit the right endpoints', () => {
   assert.match(localFeatures, /apiPut\(`\/api\/feedback\/messages\/\$\{messageId\}`, payload, \{\}, true\)/)
@@ -83,4 +87,20 @@ test('conversation id is threaded from chat to refs', () => {
 
 test('feedback payload sends conversation id', () => {
   assert.match(refsComponent, /conversation_id:\s*props\.conversationId/)
+})
+
+test('statistics overview renders a real feedback region', () => {
+  // 指标来自 overview.feedback
+  assert.match(statisticsView, /overview\.value\?\.feedback/)
+  assert.match(statisticsView, /f\.total \?\? 0/)
+  assert.match(statisticsView, /f\.satisfaction_rate/)
+  assert.match(statisticsView, /f\.coverage_rate/)
+  // 面板与原因分布
+  assert.match(statisticsView, /class="feedback-section/)
+  assert.match(statisticsView, /点踩原因 Top 10/)
+  assert.match(statisticsView, /overview\.feedback\.down_reasons/)
+  // 无反馈时显示空状态，不使用演示数据
+  assert.match(statisticsView, /feedback-empty/)
+  assert.match(statisticsView, /暂无反馈数据/)
+  assert.doesNotMatch(statisticsView, /水力压裂的最优泵入速率/)
 })

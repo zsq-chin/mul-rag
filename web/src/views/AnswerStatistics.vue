@@ -4,7 +4,8 @@ import { message } from 'ant-design-vue'
 import * as echarts from 'echarts'
 import {
   MessageCircle, TrendingUp, HelpCircle, Activity, Search,
-  ChevronRight, Award, Users, MessagesSquare, Hash, BarChart3
+  ChevronRight, Award, Users, MessagesSquare, Hash, BarChart3,
+  ThumbsUp
 } from 'lucide-vue-next'
 import {
   getStatisticsOverview, getTopQuestions, getQuestionDiscussions,
@@ -137,6 +138,21 @@ const statCards = computed(() => {
     { label: '会话记录', value: t.conversations ?? 0, icon: MessagesSquare, color: '#8b5cf6', bg: 'rgba(139, 92, 246, 0.1)' },
     { label: '活跃用户', value: t.active_users ?? 0, icon: Users, color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)' },
     { label: '对话线程', value: t.threads ?? 0, icon: Hash, color: '#06b6d4', bg: 'rgba(6, 182, 212, 0.1)' }
+  ]
+})
+
+// --- 回答反馈指标（严格来自 answer_feedback 真实表）---
+const feedbackCards = computed(() => {
+  const f = overview.value?.feedback || {}
+  const total = f.total ?? 0
+  const satisfaction = total > 0 ? ((f.satisfaction_rate ?? 0) * 100).toFixed(1) : '0.0'
+  const coverage = total > 0 ? ((f.coverage_rate ?? 0) * 100).toFixed(1) : '0.0'
+  return [
+    { label: '总反馈', value: total, icon: MessageCircle, color: '#3b82f6', bg: 'rgba(59, 130, 246, 0.1)' },
+    { label: '点赞', value: f.up ?? 0, icon: Hash, color: '#10b981', bg: 'rgba(16, 185, 129, 0.1)' },
+    { label: '点踩', value: f.down ?? 0, icon: Activity, color: '#ef4444', bg: 'rgba(239, 68, 68, 0.1)' },
+    { label: '满意度', value: satisfaction + '%', icon: Award, color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)' },
+    { label: '反馈覆盖率', value: coverage + '%', icon: BarChart3, color: '#06b6d4', bg: 'rgba(6, 182, 212, 0.1)' }
   ]
 })
 
@@ -323,6 +339,48 @@ onBeforeUnmount(() => {
             <span class="sub-hint">按提问次数</span>
           </div>
           <div ref="usersChartRef" class="chart-body" style="height: 280px;"></div>
+        </div>
+      </div>
+
+      <!-- 回答反馈区：指标 + 点踩原因分布 -->
+      <div class="feedback-section glass-panel">
+        <div class="panel-header">
+          <div class="header-left">
+            <ThumbsUp size="16" />
+            <h3>回答反馈</h3>
+          </div>
+          <span class="sub-hint">来自用户真实点赞 / 点踩</span>
+        </div>
+
+        <div v-if="(overview?.feedback?.total || 0) > 0">
+          <div class="feedback-cards">
+            <div v-for="(card, index) in feedbackCards" :key="index" class="mini-stat-card">
+              <component :is="card.icon" size="18" :style="{ color: card.color }" />
+              <div class="stat-info">
+                <span class="val">{{ card.value }}</span>
+                <span class="lbl">{{ card.label }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="feedback-bottom">
+            <div class="reason-col">
+              <div class="reason-title">点踩原因 Top 10</div>
+              <div v-if="!overview.feedback.down_reasons || overview.feedback.down_reasons.length === 0" class="reason-empty">
+                暂无点踩原因
+              </div>
+              <div v-for="(item, index) in (overview.feedback.down_reasons || []).slice(0, 10)" :key="index" class="reason-item">
+                <span class="reason-rank">{{ index + 1 }}</span>
+                <span class="reason-text">{{ item.reason }}</span>
+                <span class="reason-count">{{ item.count }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="feedback-empty">
+          <ThumbsUp size="28" color="#cbd5e1" />
+          <p>暂无反馈数据，去问答页面给回答点个赞吧</p>
         </div>
       </div>
 
@@ -632,7 +690,79 @@ onBeforeUnmount(() => {
     }
   }
 
-  // 3. 社区区
+  // 3. 回答反馈区
+  .feedback-section {
+    padding: 18px 20px;
+    margin-bottom: 32px;
+    position: relative;
+    z-index: 1;
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+
+      .header-left {
+        display: flex; align-items: center; gap: 8px;
+        color: var(--text-primary);
+        h3 { margin: 0; font-size: 15px; font-weight: 600; }
+      }
+      .sub-hint { font-size: 12px; color: var(--text-secondary); }
+    }
+
+    .feedback-cards {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+
+      .mini-stat-card {
+        padding: 10px 18px;
+        background: var(--hover);
+        border-radius: 8px;
+        display: flex; align-items: center; gap: 10px;
+
+        .stat-info {
+          display: flex; flex-direction: column;
+          .val { font-weight: 700; font-size: 16px; line-height: 1.2; color: var(--text-primary); }
+          .lbl { font-size: 12px; color: var(--text-secondary); }
+        }
+      }
+    }
+
+    .feedback-bottom {
+      margin-top: 16px;
+
+      .reason-title { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
+
+      .reason-item {
+        display: flex; align-items: center; gap: 10px;
+        padding: 6px 10px;
+        border-radius: 6px;
+
+        &:hover { background: var(--hover); }
+
+        .reason-rank {
+          width: 20px; height: 20px; flex-shrink: 0;
+          display: inline-flex; align-items: center; justify-content: center;
+          border-radius: 5px; font-size: 12px; font-weight: 700;
+          color: var(--text-secondary); background: var(--hover);
+        }
+        .reason-text { flex: 1; min-width: 0; font-size: 13px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .reason-count { font-size: 12px; color: var(--text-secondary); flex-shrink: 0; }
+      }
+
+      .reason-empty { font-size: 13px; color: var(--text-secondary); padding: 8px 0; }
+    }
+
+    .feedback-empty {
+      display: flex; flex-direction: column; align-items: center;
+      padding: 24px; color: #cbd5e1;
+      p { margin-top: 8px; font-size: 13px; }
+    }
+  }
+
+  // 4. 社区区
   .community-section {
     position: relative;
     z-index: 1;

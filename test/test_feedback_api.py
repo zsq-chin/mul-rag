@@ -209,6 +209,42 @@ class FeedbackServiceTests(unittest.TestCase):
                 session.commit()
             session.rollback()
 
+    def test_summary_reflects_delete(self):
+        """删除反馈后统计同步变化。"""
+        with _temp_db() as (engine, session):
+            uid = _seed_user_and_conv(session, msg_ids=("m-1", "m-2"))
+            upsert_feedback(session, uid, "m-1", rating="up")
+            upsert_feedback(session, uid, "m-2", rating="down")
+            self.assertEqual(feedback_service.summarize(session)["total"], 2)
+            feedback_service.delete_feedback(session, uid, "m-1")
+            summary = feedback_service.summarize(session)
+            self.assertEqual(summary["total"], 1)
+            self.assertEqual(summary["up"], 0)
+            self.assertEqual(summary["down"], 1)
+
+
+class StatisticsOverviewFeedbackTests(unittest.TestCase):
+    """/api/statistics/overview 的 feedback 区域（源码级验证，避免引入 Milvus）。"""
+
+    def setUp(self):
+        self.source = Path(__file__).resolve().parents[1] / "server" / "routers" / "statistics_router.py"
+        self.src = self.source.read_text(encoding="utf-8")
+
+    def test_overview_has_feedback_region(self):
+        self.assertIn('"feedback": feedback_service.summarize(db)', self.src)
+
+    def test_overview_keeps_old_fields(self):
+        # 旧前端字段保持兼容
+        for field in (
+            '"totals"',
+            '"daily_trend"',
+            '"agent_distribution"',
+            '"hot_questions"',
+            '"top_users"',
+            '"recent_activity"',
+        ):
+            self.assertIn(field, self.src, f"overview 缺失旧字段 {field}")
+
 
 if __name__ == "__main__":
     unittest.main()

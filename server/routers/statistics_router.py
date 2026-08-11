@@ -14,6 +14,7 @@ from server.models.chat_model import ChatRecord
 from server.models.statistics_model import Discussion, HelpRequest, Question
 from server.models.thread_model import Thread
 from server.models.user_model import User
+from server.services import feedback_service
 from server.services.statistics_aggregation import (
     MOCK_SEED_TITLES,
     aggregate_records,
@@ -111,6 +112,8 @@ def get_statistics_overview(
             "hot_questions": agg["hot_questions"],
             "top_users": top_users(agg, users_by_id),
             "recent_activity": recent_activity,
+            # 反馈指标：严格来自 answer_feedback 真实表；删除反馈后统计同步变化
+            "feedback": feedback_service.summarize(db),
         },
     }
 
