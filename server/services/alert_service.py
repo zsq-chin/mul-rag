@@ -8,13 +8,16 @@
   不写入日志。SMTP 未配置时测试邮件返回 503，但监控主流程仍正常。
 - 规则评估：触发、去重（冷却期内不重复发事件）、恢复（firing→resolved）。
   状态从 alert_events 表推导，重启不丢失，也便于验收测试。
-- 后台检查循环 alert_loop 可取消：关闭应用时等待当前一轮 evaluate() 退出。
+- 后台检查循环 alert_loop 可取消：关闭时立即停止调度新轮次；
+  round_timeout 只是观察上限，线程的真实退出由各探测项自己的 I/O 超时保证
+  （P1-5：不混用注入时钟与系统时钟；不把 wait_for 描述成能终止整轮）。
 """
 
 import asyncio
 import logging
 import os
 import smtplib
+import threading
 from datetime import datetime
 from email.header import Header
 from email.mime.text import MIMEText
@@ -274,15 +277,25 @@ def _past_cooldown(created_at, cooldown_seconds, now):
     return (now - created_at).total_seconds() >= cooldown_seconds
 
 
-def _create_event(db, rule, event_type, severity, message):
+def _create_event(db, rule, event_type, severity, message, now=None):
+    """创建告警事件。
+
+    P1-5 时间语义修正：冷却判定使用 evaluate_rules 注入的 now 时钟，
+    事件 created_at / resolved_at 也必须写同一个 now，绝不混用注入时间
+    和数据库/系统时间，否则冷却差值会变成负数（已稳定复现的 bug）。
+    now 为 None 时（acknowledge 等场景）回退系统时间。
+    """
     is_resolve = event_type == "recover"
+    if now is None:
+        now = datetime.now()
     ev = AlertEvent(
         rule_id=rule.id,
         event_type=event_type,
         severity=severity,
         status="resolved" if is_resolve else "firing",
         message=(message or "")[:1000],
-        resolved_at=datetime.now() if is_resolve else None,
+        created_at=now,
+        resolved_at=now if is_resolve else None,
     )
     db.add(ev)
     db.commit()
@@ -310,19 +323,25 @@ def _evaluate_rule(db, rule, ctx, milvus_probe=None, neo4j_probe=None):
             used = res.get("used_percent") if res.get("status") == "ok" else 0.0
             return res.get("status") != "ok" or used >= threshold, "磁盘已用 {}%（阈值 {}%）".format(used, threshold)
         if rt == "sqlite_check":
-            res = monitoring_service.check_sqlite(ctx.get("db_path"))
+            # SQLite busy_timeout 是真实 I/O 超时，探测不会无限阻塞
+            res = monitoring_service.check_sqlite(ctx.get("db_path"), timeout=2.0)
             return res.get("status") != "ok", res.get("detail") or "SQLite 检查失败"
         if rt == "milvus":
-            res = monitoring_service.check_milvus(ctx.get("milvus_uri"), probe=milvus_probe)
+            # Milvus 探测的真实 I/O 超时（3s），默认 probe 由 pymilvus 客户端超时保证
+            res = monitoring_service.check_milvus(
+                ctx.get("milvus_uri"), timeout=3.0, probe=milvus_probe
+            )
             return res.get("status") != "ok", res.get("detail") or "Milvus 不可用"
         if rt == "neo4j":
+            # Neo4j 探测的真实 I/O 超时（3s），由连接/验证超时保证
             res = monitoring_service.check_neo4j(
                 ctx.get("neo4j_uri"), ctx.get("neo4j_username"), ctx.get("neo4j_password"),
-                probe=neo4j_probe,
+                timeout=3.0, probe=neo4j_probe,
             )
             return res.get("status") != "ok", res.get("detail") or "Neo4j 不可用"
         if rt == "gpu_mem":
-            res = monitoring_service.check_gpu()
+            # nvidia-smi 子进程真实超时（3s），超时由 subprocess.run(timeout=...) 保证
+            res = monitoring_service.check_gpu(timeout=3.0)
             if res.get("status") != "ok":
                 return False, res.get("detail") or "GPU 不可用（不告警）"
             threshold = float(rule.threshold or 90)
@@ -358,13 +377,13 @@ def evaluate_rules(db: Session, ctx, now=None, milvus_probe=None, neo4j_probe=No
                 last.created_at, rule.cooldown_seconds, now
             ):
                 continue
-            ev = _create_event(db, rule, "trigger", "warning", detail)
+            ev = _create_event(db, rule, "trigger", "warning", detail, now=now)
             fired.append(ev.id)
             if notify:
                 notify(rule, "告警触发：{}".format(rule.name), detail, is_resolve=False)
         else:
             if last is not None and last.status in ("firing", "acknowledged"):
-                ev = _create_event(db, rule, "recover", "info", "已恢复正常")
+                ev = _create_event(db, rule, "recover", "info", "已恢复正常", now=now)
                 resolved.append(ev.id)
                 if notify:
                     notify(rule, "告警恢复：{}".format(rule.name), "已恢复正常", is_resolve=True)
@@ -376,16 +395,138 @@ def evaluate_rules(db: Session, ctx, now=None, milvus_probe=None, neo4j_probe=No
 # ---------------------------------------------------------------------------
 
 
-async def alert_loop(evaluate, interval=60.0, stop=None):
-    """循环执行 evaluate()，间隔 interval 秒。stop.set() 后结束本轮退出。"""
-    while True:
-        try:
-            evaluate()
-        except Exception:  # noqa: BLE001
-            logger.exception("alert evaluation failed")
-        if stop is not None and stop.is_set():
-            break
-        try:
-            await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            break
+def _coerce_interval(value) -> float:
+    """把任意输入兜底为合法正间隔（非法/非正一律回退 60）。"""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = 60.0
+    return value if value > 0 else 60.0
+
+
+def alert_interval_seconds(env=None) -> float:
+    """读取 ALERT_CHECK_INTERVAL_SECONDS，必须为正数；非法/非正回退默认 60。
+
+    负间隔会让 asyncio.sleep 立即返回形成忙循环，因此必须在此统一兜底。
+    """
+    env = env if env is not None else os.environ
+    return _coerce_interval(env.get("ALERT_CHECK_INTERVAL_SECONDS") or 60)
+
+
+def alert_round_timeout_seconds(env=None) -> float:
+    """读取 ALERT_EVALUATE_TIMEOUT_SECONDS，必须为正数；非法/非正回退默认 90。"""
+    env = env if env is not None else os.environ
+    try:
+        value = float(env.get("ALERT_EVALUATE_TIMEOUT_SECONDS") or 90)
+    except (TypeError, ValueError):
+        value = 90.0
+    return value if value > 0 else 90.0
+
+
+class AlertLoopState:
+    """alert_loop 运行状态（运维/测试可观察：是否正在跑、是否超时卡住、跳过/完成次数）。
+
+    - running:    当前是否有评估线程在后台执行；
+    - timed_out:  上一轮超过 round_timeout 仍未完成（线程仍可能在后台执行）；
+    - completed:  已启动并结束的轮次数；
+    - skipped:    因上一轮未结束而被跳过的轮次数；
+    - stopped:    循环已退出（stop 置位或被取消）。
+    """
+
+    def __init__(self):
+        self.running = False
+        self.timed_out = False
+        self.completed = 0
+        self.skipped = 0
+        self.stopped = False
+        self._future = None
+
+    def as_dict(self) -> dict:
+        return {
+            "running": self.running,
+            "timed_out": self.timed_out,
+            "completed": self.completed,
+            "skipped": self.skipped,
+            "stopped": self.stopped,
+        }
+
+
+def _run_round(evaluate, state):
+    """在后台线程执行一轮 evaluate()；异常只记录日志，不污染 state/future。"""
+    try:
+        evaluate()
+    except Exception:  # noqa: BLE001
+        logger.exception("alert evaluation round failed")
+    finally:
+        state.running = False
+        state.completed += 1
+
+
+async def alert_loop(evaluate, interval=60.0, stop=None, round_timeout=None, state=None):
+    """循环执行 evaluate()，间隔 interval 秒。stop.set() 后停止调度新轮次并退出。
+
+    时间语义（P1-5 修正，与旧实现的关键差异）：
+    - 每轮通过 asyncio.to_thread 在后台线程执行同步探测，绝不阻塞事件循环；
+    - round_timeout 只是“观察上限”：超时只记录 timed_out 状态并跳过后续轮次，
+      绝不声称能终止线程——线程的真实退出由各探测项自己的 I/O 超时
+      （Milvus 3s / Neo4j 3s / SMTP 10s / nvidia-smi 子进程 3s）保证；
+    - 显式跟踪当前运行 future：上一轮未结束时本轮自动跳过（不重复提交线程），
+      卡住状态经 state.timed_out 暴露，且只在状态切换时记录一次日志，
+      避免 0.01s 间隔循环刷几十条警告；
+    - 关闭：stop.set() 或取消后立即停止调度，已提交的线程不被强行杀死
+      （线程无法安全 kill），但绝不再提交新线程，因此不会遗留“无限堆积的
+      告警执行线程”，也不会永久占住任何锁。
+    """
+    interval = _coerce_interval(interval)
+    if state is None:
+        state = AlertLoopState()
+    ran_any_round = False
+    try:
+        while True:
+            # stop 置位后（且已至少执行过一轮）立即停止调度新轮次；
+            # 兼容“stop 提前置位但要求先跑一轮再退出”的历史语义。
+            if stop is not None and stop.is_set() and ran_any_round:
+                break
+            fut = state._future
+            if fut is not None and not fut.done():
+                # 上一轮线程仍在后台执行（如真实 I/O 阻塞）：本轮跳过，不重复提交
+                state.skipped += 1
+                if not state.timed_out:
+                    state.timed_out = True
+                    logger.warning("上一轮告警评估仍在进行，跳过本轮")
+            else:
+                if state.timed_out:
+                    logger.info("上一轮告警评估已结束，恢复常规轮次")
+                state.timed_out = False
+                state.running = True
+                ran_any_round = True
+                state._future = asyncio.ensure_future(
+                    asyncio.to_thread(_run_round, evaluate, state)
+                )
+                fut = state._future
+                try:
+                    if round_timeout is None or round_timeout <= 0:
+                        await asyncio.shield(fut)
+                    else:
+                        await asyncio.wait_for(asyncio.shield(fut), timeout=round_timeout)
+                except asyncio.TimeoutError:
+                    state.timed_out = True
+                    logger.warning(
+                        "告警评估本轮超过 %.1fs 未完成（线程仍在后台执行，后续轮次自动跳过）",
+                        round_timeout,
+                    )
+                except asyncio.CancelledError:
+                    # 关闭路径：不强行杀死后台线程，但立即停止调度新轮次
+                    break
+                except Exception:  # noqa: BLE001
+                    logger.exception("alert evaluation failed")
+            if stop is not None and stop.is_set():
+                break
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+    finally:
+        state.stopped = True
+        state.running = state._future is not None and not state._future.done()
+    return state

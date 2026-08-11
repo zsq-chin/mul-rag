@@ -5,10 +5,11 @@
 API 响应与日志绝不含 SMTP 密码；未配置时测试邮件返回 503。
 """
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from server.db_manager import db_manager
+from server.schemas.alert import AlertRuleCreate, AlertRuleUpdate, TestEmailPayload
 from server.services import alert_service, audit_service
 from server.utils.auth_middleware import get_superadmin_user
 
@@ -34,22 +35,30 @@ def _raise(exc: alert_service.AlertError):
 @router.post("/alert-rules")
 async def create_alert_rule(
     request: Request,
-    payload: dict = Body(...),
+    payload: AlertRuleCreate,
     db: Session = Depends(get_db),
     superadmin=Depends(get_superadmin_user),
 ):
     try:
         row = alert_service.create_rule(
             db,
-            name=payload.get("name"),
-            rule_type=payload.get("rule_type"),
-            enabled=payload.get("enabled", True),
-            threshold=payload.get("threshold"),
-            cooldown_seconds=payload.get("cooldown_seconds"),
-            notify_email=payload.get("notify_email"),
+            name=payload.name,
+            rule_type=payload.rule_type,
+            enabled=payload.enabled,
+            threshold=payload.threshold,
+            cooldown_seconds=payload.cooldown_seconds,
+            notify_email=payload.notify_email,
             created_by=superadmin.username,
         )
     except alert_service.AlertError as e:
+        audit_service.record(
+            "alert.rule.create",
+            user_id=superadmin.id,
+            resource_type="alert_rule",
+            status="failed",
+            detail={"rule_name": payload.name, "rule_type": payload.rule_type, "reason": str(e)[:200]},
+            ip=_client_ip(request),
+        )
         _raise(e)
     audit_service.record(
         "alert.rule.create",
@@ -74,13 +83,23 @@ async def get_alert_rules(
 async def update_alert_rule(
     rule_id: int,
     request: Request,
-    payload: dict = Body(...),
+    payload: AlertRuleUpdate,
     db: Session = Depends(get_db),
     superadmin=Depends(get_superadmin_user),
 ):
     try:
-        row = alert_service.update_rule(db, rule_id, **payload)
+        # exclude_unset 区分“未提交”与“明确清空（null）”
+        row = alert_service.update_rule(db, rule_id, **payload.model_dump(exclude_unset=True))
     except alert_service.AlertError as e:
+        audit_service.record(
+            "alert.rule.update",
+            user_id=superadmin.id,
+            resource_type="alert_rule",
+            resource_id=rule_id,
+            status="failed",
+            detail={"rule_id": rule_id, "reason": str(e)[:200]},
+            ip=_client_ip(request),
+        )
         _raise(e)
     audit_service.record(
         "alert.rule.update",
@@ -103,12 +122,22 @@ async def delete_alert_rule(
     try:
         data = alert_service.delete_rule(db, rule_id)
     except alert_service.AlertError as e:
+        audit_service.record(
+            "alert.rule.delete",
+            user_id=superadmin.id,
+            resource_type="alert_rule",
+            resource_id=rule_id,
+            status="failed",
+            detail={"rule_id": rule_id, "reason": str(e)[:200]},
+            ip=_client_ip(request),
+        )
         _raise(e)
     audit_service.record(
         "alert.rule.delete",
         user_id=superadmin.id,
         resource_type="alert_rule",
         resource_id=rule_id,
+        detail={"deleted": True},
         ip=_client_ip(request),
     )
     return {"status": "success", "data": data, "message": ""}
@@ -140,6 +169,15 @@ async def acknowledge_alert_event(
     try:
         row = alert_service.acknowledge_event(db, event_id)
     except alert_service.AlertError as e:
+        audit_service.record(
+            "alert.event.acknowledge",
+            user_id=superadmin.id,
+            resource_type="alert_event",
+            resource_id=event_id,
+            status="failed",
+            detail={"event_id": event_id, "reason": str(e)[:200]},
+            ip=_client_ip(request),
+        )
         _raise(e)
     audit_service.record(
         "alert.event.acknowledge",
@@ -155,12 +193,10 @@ async def acknowledge_alert_event(
 @router.post("/email/test")
 async def test_email(
     request: Request,
-    payload: dict = Body(...),
+    payload: TestEmailPayload,
     superadmin=Depends(get_superadmin_user),
 ):
-    to_email = (payload.get("to_email") or "").strip()
-    if not to_email:
-        raise HTTPException(status_code=400, detail="缺少收件人 to_email")
+    to_email = payload.to_email.strip()
     try:
         cfg = alert_service.smtp_from_env()
         data = alert_service.send_email(cfg, to_email, "Sage 系统测试邮件", "这是一封来自 Sage 本机系统的测试邮件。")

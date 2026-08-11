@@ -29,7 +29,11 @@ logger.info(f"加载环境变量文件: {env_path}")
 
 
 async def _run_alert_checker(stop_event: asyncio.Event) -> None:
-    """后台告警检查任务：循环评估告警规则，stop_event 置位后等待当前轮退出。"""
+    """后台告警检查任务：循环评估告警规则，stop_event 置位后等待当前轮退出。
+
+    评估全程经 alert_loop 的 asyncio.to_thread 放到后台线程，阻塞探测不占用事件循环。
+    间隔与单轮超时均须为正数，非法环境变量由 alert_service 兜底回退默认值。
+    """
     def _evaluate() -> None:
         session = None
         try:
@@ -58,8 +62,11 @@ async def _run_alert_checker(stop_event: asyncio.Event) -> None:
             if session is not None:
                 session.close()
 
-    interval = float(os.environ.get("ALERT_CHECK_INTERVAL_SECONDS", "60") or 60)
-    await alert_service.alert_loop(_evaluate, interval=interval, stop=stop_event)
+    interval = alert_service.alert_interval_seconds()
+    round_timeout = alert_service.alert_round_timeout_seconds()
+    await alert_service.alert_loop(
+        _evaluate, interval=interval, round_timeout=round_timeout, stop=stop_event
+    )
 
 
 @asynccontextmanager
