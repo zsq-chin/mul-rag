@@ -46,6 +46,63 @@ export const governanceApi = {
     `/api/governance/databases/${dbId}/documents/${fileId}/versions/${version}/download`,
 }
 
+/** 问答测试集（仅 superadmin；只做用例管理，不调用模型） */
+export const evaluationApi = {
+  suites: (params) => {
+    const qs = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''),
+      ),
+    ).toString()
+    return apiGet(`/api/evaluation/suites?${qs}`, {}, true)
+  },
+  suite: (suiteId) => apiGet(`/api/evaluation/suites/${suiteId}`, {}, true),
+  createSuite: (payload) => apiPost('/api/evaluation/suites', payload, {}, true),
+  updateSuite: (suiteId, payload) =>
+    apiPatch(`/api/evaluation/suites/${suiteId}`, payload, {}, true),
+  deleteSuite: (suiteId) => apiDelete(`/api/evaluation/suites/${suiteId}`, {}, true),
+  cases: (suiteId, params) => {
+    const qs = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''),
+      ),
+    ).toString()
+    return apiGet(`/api/evaluation/suites/${suiteId}/cases?${qs}`, {}, true)
+  },
+  createCase: (suiteId, payload) =>
+    apiPost(`/api/evaluation/suites/${suiteId}/cases`, payload, {}, true),
+  updateCase: (suiteId, caseId, payload) =>
+    apiPatch(`/api/evaluation/suites/${suiteId}/cases/${caseId}`, payload, {}, true),
+  deleteCase: (suiteId, caseId) =>
+    apiDelete(`/api/evaluation/suites/${suiteId}/cases/${caseId}`, {}, true),
+  importUrl: (suiteId, format) =>
+    `/api/evaluation/suites/${suiteId}/import?format=${format}`,
+  exportUrl: (suiteId, format) =>
+    `/api/evaluation/suites/${suiteId}/export?format=${format}`,
+}
+
+/**
+ * 带认证头的 multipart 上传（导入用例用）。
+ * 返回解析后的 JSON；非 2xx 抛错。
+ */
+export async function uploadAuthenticated(url, file) {
+  const userStore = useUserStore()
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(url, { method: 'POST', headers: userStore.getAuthHeaders(), body: form })
+  if (!res.ok) {
+    let msg = `上传失败: ${res.status}`
+    try {
+      const body = await res.json()
+      msg = body.detail || body.message || msg
+    } catch (e) {
+      // 忽略非 JSON 错误体
+    }
+    throw new Error(msg)
+  }
+  return res.json()
+}
+
 /**
  * 受控下载/导出：携带认证头请求文件，触发浏览器保存。
  * 返回 { ok, message }；403/404/500 时返回可展示的错误信息。

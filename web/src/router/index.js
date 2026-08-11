@@ -189,6 +189,19 @@ const router = createRouter({
       ]
     },
     {
+      path: '/evaluation',
+      name: 'evaluation',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'EvaluationComp',
+          component: () => import('../views/EvaluationView.vue'),
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/evaluation') }
+        }
+      ]
+    },
+    {
       path: '/search',
       name: 'search',
       component: AppLayout,
