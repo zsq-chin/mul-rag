@@ -87,7 +87,7 @@ class Retriever:
     def construct_query(self, query, refs, meta):
         logger.debug(f"{refs=}")
         if not refs or len(refs) == 0:
-            return query
+            refs = {}
 
         external_parts = []
 
@@ -118,16 +118,11 @@ class Retriever:
         elif meta.get("use_multimodal_kb") and multimodal_refs.get("message"):
             external_parts.extend(["多模态知识库状态:", multimodal_refs["message"]])
 
-        # 构造查询
-        from src.utils.prompts import knowbase_qa_template
-        from src.utils.prompts import knowbase_itemGen_template
-        if external_parts and len(external_parts) > 0:
-            external = "\n\n".join(external_parts)
-            # 题目生成的请求单独处理
-            if meta.get("isItemRequest"):
-                query = knowbase_itemGen_template.format(external=external, params=meta.get("isItemRequest"))
-            else:
-                query = knowbase_qa_template.format(external=external, query=query)
+        # 构造查询：未启用任何检索时保持原样返回（普通聊天回归，P1-2）；
+        # 已启用检索但证据为空时才注入“无证据”模板，要求模型明确说明证据不足而非编造
+        from src.utils.prompts import build_chat_prompt
+        external = "\n\n".join(external_parts) if external_parts else ""
+        query = build_chat_prompt(query, external, meta, params=meta.get("isItemRequest"))
         logger.info(f"-------------RAG-final-prompt---------- {str(query)}")
         return query
 

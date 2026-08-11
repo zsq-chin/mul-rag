@@ -93,6 +93,40 @@ _stub_src_utils.__path__ = []
 _stub_src_utils.logger = _stub_logger
 
 _stub_src_utils_prompts = types.ModuleType("src.utils.prompts")
+# construct_query 委托 build_chat_prompt 构建提示词；stub 需镜像真实模块的接口
+_stub_src_utils_prompts.NO_EVIDENCE_MARKER = "（未检索到有效参考资料）"
+_stub_src_utils_prompts.knowbase_qa_template = "CONTEXT:\n{external}\nQUERY:{query}"
+_stub_src_utils_prompts.knowbase_itemGen_template = "{external}\n{params}"
+_stub_src_utils_prompts.RETRIEVAL_META_KEYS = ("db_id", "use_graph", "use_web", "use_multimodal_kb")
+
+
+def _stub_retrieval_mode_enabled(meta):
+    if not isinstance(meta, dict):
+        return False
+    return any(meta.get(k) for k in _stub_src_utils_prompts.RETRIEVAL_META_KEYS)
+
+
+def _stub_build_qa_prompt(query, external, params=None, is_item_request=False):
+    if is_item_request:
+        return _stub_src_utils_prompts.knowbase_itemGen_template.format(
+            external=external or "", params=params
+        )
+    if not external or not str(external).strip():
+        external = _stub_src_utils_prompts.NO_EVIDENCE_MARKER
+    return _stub_src_utils_prompts.knowbase_qa_template.format(external=external, query=query)
+
+
+def _stub_build_chat_prompt(query, external, meta, params=None):
+    if isinstance(meta, dict) and meta.get("isItemRequest"):
+        return _stub_build_qa_prompt(query, external, params=params, is_item_request=True)
+    if not _stub_retrieval_mode_enabled(meta):
+        return query
+    return _stub_build_qa_prompt(query, external, params=params)
+
+
+_stub_src_utils_prompts.build_qa_prompt = _stub_build_qa_prompt
+_stub_src_utils_prompts.retrieval_mode_enabled = _stub_retrieval_mode_enabled
+_stub_src_utils_prompts.build_chat_prompt = _stub_build_chat_prompt
 
 # -- src stub (bare; never triggers real __init__) -------------------------
 
@@ -615,6 +649,22 @@ class TestGraphRetrieverIntegration(unittest.TestCase):
         prompt_mod = types.ModuleType("src.utils.prompts")
         prompt_mod.knowbase_qa_template = "CONTEXT:\n{external}\nQUERY:{query}"
         prompt_mod.knowbase_itemGen_template = "{external}\n{params}"
+        prompt_mod.RETRIEVAL_META_KEYS = ("db_id", "use_graph", "use_web", "use_multimodal_kb")
+
+        def _pm_qa(query, external, params=None, is_item_request=False):
+            if is_item_request:
+                return prompt_mod.knowbase_itemGen_template.format(external=external, params=params)
+            return prompt_mod.knowbase_qa_template.format(external=external, query=query)
+
+        def _pm_chat(query, external, meta, params=None):
+            if isinstance(meta, dict) and meta.get("isItemRequest"):
+                return _pm_qa(query, external, params=params, is_item_request=True)
+            if not (isinstance(meta, dict) and any(meta.get(k) for k in prompt_mod.RETRIEVAL_META_KEYS)):
+                return query
+            return _pm_qa(query, external, params=params)
+
+        prompt_mod.build_qa_prompt = _pm_qa
+        prompt_mod.build_chat_prompt = _pm_chat
         refs = {
             "knowledge_base": {"results": []},
             "graph_base": {
@@ -632,7 +682,7 @@ class TestGraphRetrieverIntegration(unittest.TestCase):
             "multimodal_knowledge_base": {"results": []},
         }
         with patch.dict(sys.modules, {"src.utils.prompts": prompt_mod}):
-            result = r.construct_query("question", refs, {})
+            result = r.construct_query("question", refs, {"use_graph": True})
         self.assertIn("[G1] well --contains--> casing", result)
         self.assertNotIn("WRONG_SOURCE", result)
 

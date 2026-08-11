@@ -9,8 +9,13 @@ def get_system_prompt():
     )
 
 
+# 未检索到有效参考资料时的占位标记：让模板要求模型明确说明证据不足，而非编造。
+NO_EVIDENCE_MARKER = "（未检索到有效参考资料）"
+
 knowbase_qa_template = """
 请利用查询到的资料回答问题，回答问题时，不要过度的分点作答。
+若参考资料为空或不足，请直接明确说明“证据不足/无法从现有资料回答”，
+不要编造或臆测内容。
 
 <参考资料>：
 {external}
@@ -42,6 +47,51 @@ knowbase_itemGen_template = """
 <参考资料>{external}</参考资料>
 请生成符合以上要求的题目。
 """
+
+
+def build_qa_prompt(query, external, params=None, is_item_request=False):
+    """构建问答提示词。
+
+    参考资料为空/空白时用 NO_EVIDENCE_MARKER 占位，问答模板会要求模型
+    明确说明“证据不足”，而不是凭空编造；出题请求走 knowbase_itemGen_template，
+    该模板自带“信息不足”处理，保持原样不注入占位标记。
+    """
+    if is_item_request:
+        return knowbase_itemGen_template.format(external=external or "", params=params)
+    if not external or not str(external).strip():
+        external = NO_EVIDENCE_MARKER
+    return knowbase_qa_template.format(external=external, query=query)
+
+
+# meta 中“明确启用某类检索”的键：任一为真即视为用户选择了检索源。
+RETRIEVAL_META_KEYS = ("db_id", "use_graph", "use_web", "use_multimodal_kb")
+
+
+def retrieval_mode_enabled(meta) -> bool:
+    """meta 是否明确启用了任一检索模式（知识库 / 图谱 / 联网 / 多模态）。
+
+    普通聊天（未选择任何检索源）不启用检索，construct_query 必须保持原样
+    返回原始 query，不受“无证据”模板影响（P1-2 回归）。
+    """
+    if not isinstance(meta, dict):
+        return False
+    return any(meta.get(k) for k in RETRIEVAL_META_KEYS)
+
+
+def build_chat_prompt(query, external, meta, params=None):
+    """构造最终问答提示词（construct_query 的提示词选择纯函数）。
+
+    规则：
+    - 出题请求（isItemRequest）→ 出题模板，自带“信息不足”处理；
+    - 未启用任何检索 → 返回原始 query（普通聊天回归）；
+    - 已启用检索但证据为空 → 无证据占位模板，要求模型明确说明“证据不足”；
+    - 有证据 → 正常问答模板，引用资料回答。
+    """
+    if isinstance(meta, dict) and meta.get("isItemRequest"):
+        return build_qa_prompt(query, external, params=params, is_item_request=True)
+    if not retrieval_mode_enabled(meta):
+        return query
+    return build_qa_prompt(query, external, params=params)
 
 rewritten_query_prompt_template = """
 <指令>根据提供的历史信息对问题进行优化和改写，返回的问题必须符合以下内容要求和格式要求。严格不能出现禁止内容<指令>
