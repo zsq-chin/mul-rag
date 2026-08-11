@@ -66,6 +66,7 @@
         :is-processing="isStreaming"
         :show-refs="messageRefActions"
         :is-latest-message="isLatestMessage(index)"
+        :conversation-id="conv.id"
         @retry="retryMessage(message.id)"
         @retryStoppedMessage="retryStoppedMessage(message.id)"
         @openRefs="handleOpenRefs"

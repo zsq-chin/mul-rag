@@ -7,6 +7,7 @@ from server.routers.college_router import college
 from server.routers.multimodal_proxy_router import multimodal
 from server.routers.statistics_router import router as statistics_router
 from server.routers.user_model_router import user_models
+from server.routers.feedback_router import router as feedback_router
 
 router = APIRouter()
 router.include_router(base)
@@ -17,3 +18,4 @@ router.include_router(college)
 router.include_router(multimodal)
 router.include_router(statistics_router)
 router.include_router(user_models)
+router.include_router(feedback_router)

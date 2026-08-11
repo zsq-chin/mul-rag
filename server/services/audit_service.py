@@ -41,6 +41,7 @@ AUDIT_DETAIL_WHITELIST = frozenset({
     "backup_id",
     "reason",
     "count",
+    "rating",
 })
 
 # 命中即丢弃的密钥提示词（黑名单，双重保险）

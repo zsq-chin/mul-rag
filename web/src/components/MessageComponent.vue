@@ -68,7 +68,7 @@
 
 
       <div v-if="(message.role=='received' || message.role=='assistant') && message.status=='finished' && showRefs">
-        <RefsComponent :message="message" :show-refs="showRefs" :is-latest-message="isLatestMessage" @retry="emit('retry')" @openRefs="emit('openRefs', $event)" />
+        <RefsComponent :message="message" :show-refs="showRefs" :is-latest-message="isLatestMessage" :conversation-id="conversationId" @retry="emit('retry')" @openRefs="emit('openRefs', $event)" />
       </div>
       <div v-if="(message.role === 'received' || message.role === 'assistant') && message.related_questions && message.related_questions.length > 0" class="related-questions">
         <div class="rec-title">
@@ -131,6 +131,11 @@ const props = defineProps({
   isLatestMessage: {
     type: Boolean,
     default: false
+  },
+  // 当前会话 ID（用于反馈关联）
+  conversationId: {
+    type: String,
+    default: ''
   }
 });
 
