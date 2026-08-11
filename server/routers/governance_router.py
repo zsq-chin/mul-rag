@@ -288,8 +288,8 @@ async def download_document_version(
 @router.get("/databases/{db_id}/export")
 async def export_governance_metadata(
     db_id: str,
-    format: str = Query("json", pattern="^(json|xlsx)$"),
     request: Request,
+    format: str = Query("json", pattern="^(json|xlsx)$"),
     db: Session = Depends(get_db),
     superadmin=Depends(get_superadmin_user),
 ):

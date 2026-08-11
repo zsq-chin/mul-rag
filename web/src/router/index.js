@@ -202,6 +202,19 @@ const router = createRouter({
       ]
     },
     {
+      path: '/operations',
+      name: 'operations',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'OperationsComp',
+          component: () => import('../views/OperationsView.vue'),
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/operations') }
+        }
+      ]
+    },
+    {
       path: '/search',
       name: 'search',
       component: AppLayout,

@@ -235,8 +235,8 @@ async def import_evaluation_cases(
 @router.get("/suites/{suite_id}/export")
 async def export_evaluation_cases(
     suite_id: int,
-    format: str = Query("json", pattern="^(json|csv)$"),
     request: Request,
+    format: str = Query("json", pattern="^(json|csv)$"),
     db: Session = Depends(get_db),
     superadmin=Depends(get_superadmin_user),
 ):

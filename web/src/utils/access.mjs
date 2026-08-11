@@ -7,6 +7,7 @@ export const NAVIGATION = [
   { key: 'database', name: '知识库', path: '/database', roles: ['superadmin'] },
   { key: 'statistics', name: '问答统计', path: '/statistics', roles: ['superadmin'] },
   { key: 'evaluation', name: '问答测试集', path: '/evaluation', roles: ['superadmin'] },
+  { key: 'operations', name: '系统运维', path: '/operations', roles: ['superadmin'] },
   { key: 'multimodal', name: '多模态知识库', path: '/multimodal-kb', roles: ['superadmin'] },
 ]
 

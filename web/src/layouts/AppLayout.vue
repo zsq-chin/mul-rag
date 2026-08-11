@@ -6,7 +6,7 @@ import {
   BugOutlined,
   ExclamationCircleOutlined,
 } from '@ant-design/icons-vue'
-import { Bot, Flame ,Waypoints,TextSearch ,Speech ,Share2 ,Captions ,Milestone, LibraryBig,BookOpenCheck , MessageSquareMore, Settings,Hourglass,PencilLine ,Move, BarChart3, Layers, Moon, Sun } from 'lucide-vue-next';
+import { Bot, Flame ,Waypoints,TextSearch ,Speech ,Share2 ,Captions ,Milestone, LibraryBig,BookOpenCheck , MessageSquareMore, Settings,Hourglass,PencilLine ,Move, BarChart3, Layers, Moon, Sun, ClipboardCheck, ServerCog } from 'lucide-vue-next';
 
 import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
@@ -69,6 +69,8 @@ const ICON_MAP = {
   graph: Share2,
   database: BookOpenCheck,
   statistics: BarChart3,
+  evaluation: ClipboardCheck,
+  operations: ServerCog,
   multimodal: Layers,
 }
 

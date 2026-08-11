@@ -22,7 +22,18 @@ test('superadmin sees managed features', () => {
   const keys = navigationForRole('superadmin').map(item => item.key)
   assert.ok(keys.includes('graph'))
   assert.ok(keys.includes('database'))
+  assert.ok(keys.includes('evaluation'))
+  assert.ok(keys.includes('operations'))
   assert.ok(keys.includes('multimodal'))
+})
+
+test('superadmin-only pages never appear in user or admin nav', () => {
+  const adminKeys = navigationForRole('admin').map(item => item.key)
+  const userKeys = navigationForRole('user').map(item => item.key)
+  for (const key of ['evaluation', 'operations', 'graph', 'database', 'statistics', 'multimodal']) {
+    assert.ok(!adminKeys.includes(key), `admin must not see ${key}`)
+    assert.ok(!userKeys.includes(key), `user must not see ${key}`)
+  }
 })
 
 test('route roles are exact', () => {
@@ -36,7 +47,7 @@ test('only the knowledge chat route is shared by all authenticated roles', () =>
   for (const path of [
     '/agent', '/agent/:agent_id', '/guide', '/writer', '/item', '/datamining',
     '/setting', '/test', '/search', '/liaohe', '/exam/:id', '/graph',
-    '/database', '/statistics', '/multimodal-kb',
+    '/database', '/statistics', '/evaluation', '/operations', '/multimodal-kb',
   ]) {
     assert.deepEqual(rolesForRoute(path), ['superadmin'], path)
   }
