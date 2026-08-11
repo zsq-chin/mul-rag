@@ -11,9 +11,15 @@ from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Body, Q
 from urllib.parse import quote
 from starlette.responses import StreamingResponse
 
-from src.utils import logger, hashstr
+from src.utils import logger
 from src import executor, retriever, config, knowledge_base, graph_base
 from server.services.audit_service import AuditService
+from server.services.upload_service import (
+    UploadError,
+    resolve_upload_path,
+    resolve_upload_paths,
+    save_upload_stream_async,
+)
 from server.utils.auth_middleware import get_required_user, get_superadmin_user
 from server.models.user_model import User
 from server.services.graph_import import GraphImportService, internal_token_matches, resolve_import_artifact
@@ -27,6 +33,8 @@ from pathlib import Path as PathlibPath
 data = APIRouter(prefix="/data")
 UPLOAD_DIR = Path(os.getenv("GRAPH_UPLOAD_DIR", os.path.join(config.save_dir, "data", "graphragfile")))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# 无 db_id 的通用上传目录（graphrag 预处理等流程使用）
+GENERAL_UPLOAD_DIR = os.path.join(config.save_dir, "data", "uploads")
 
 TIANSHU_API_BASE = os.getenv("TIANSHU_API_BASE", "http://tianshu-backend:8000/api/v1")
 
@@ -154,8 +162,14 @@ async def file_to_chunk(db_id: str = Body(...), files: list[str] = Body(...), pa
     logger.debug(f"File to chunk for db_id {db_id}: {files} {params=}")
     try:
         async with retrieval_gate:
-            processed_files = await knowledge_base.save_files_for_pending_indexing(db_id, files, params)
+            # 前端提交的是上传接口返回的 file_id（裸存储名），解析到该库的上传目录；
+            # 兼容通用上传目录，但绝对路径/目录穿越一律由解析器拒绝
+            upload_dir = await _run_blocking(knowledge_base.get_db_upload_path, db_id)
+            resolved = resolve_upload_paths(upload_dir, files, general_dir=GENERAL_UPLOAD_DIR)
+            processed_files = await knowledge_base.save_files_for_pending_indexing(db_id, resolved, params)
         return {"message": "Files processed and pending indexing", "files": processed_files, "status": "success"}
+    except UploadError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"Failed to process files for pending indexing: {e}, {traceback.format_exc()}")
         return {"message": f"Failed to process files for pending indexing: {e}", "status": "failed"}
@@ -234,33 +248,48 @@ async def upload_file(
     request: Request = None,
     current_user: User = Depends(get_superadmin_user)
 ):
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No selected file")
+    ip = request.client.host if request and request.client else None
+    try:
+        # 根据db_id获取上传路径，如果db_id为None则使用默认路径
+        if db_id:
+            async with retrieval_gate:
+                upload_dir = await _run_blocking(knowledge_base.get_db_upload_path, db_id)
+        else:
+            upload_dir = GENERAL_UPLOAD_DIR
 
-    # 根据db_id获取上传路径，如果db_id为None则使用默认路径
-    if db_id:
-        async with retrieval_gate:
-            upload_dir = await _run_blocking(knowledge_base.get_db_upload_path, db_id)
-    else:
-        upload_dir = os.path.join(config.save_dir, "data", "uploads")
-
-    basename, ext = os.path.splitext(file.filename)
-    filename = f"{basename}_{hashstr(basename, 4, with_salt=True)}{ext}".lower()
-    file_path = os.path.join(upload_dir, filename)
-    os.makedirs(upload_dir, exist_ok=True)
-
-    with open(file_path, "wb") as buffer:
-        buffer.write(await file.read())
+        # 分块流式 + 白名单 + 大小上限 + 原子改名，全程不整体读入内存
+        stored_name, size_bytes = await save_upload_stream_async(file, upload_dir)
+    except UploadError as e:
+        AuditService.record(
+            "knowledge.upload",
+            user_id=current_user.id,
+            resource_type="knowledge_file",
+            status="failed",
+            detail={
+                "filename": getattr(file, "filename", "") or "",
+                "db_id": db_id,
+                "reason": e.message[:200],
+            },
+            ip=ip,
+        )
+        raise HTTPException(status_code=e.status_code, detail=e.message)
 
     AuditService.record(
         "knowledge.upload",
         user_id=current_user.id,
         resource_type="knowledge_file",
-        resource_id=filename,
-        detail={"filename": file.filename, "db_id": db_id},
-        ip=request.client.host if request and request.client else None,
+        resource_id=stored_name,
+        detail={"filename": getattr(file, "filename", "") or "", "db_id": db_id, "size_bytes": size_bytes},
+        ip=ip,
     )
-    return {"message": "File successfully uploaded", "file_path": file_path, "db_id": db_id}
+    # 只返回 file_id/文件名/大小，绝不返回服务器绝对路径
+    return {
+        "message": "File successfully uploaded",
+        "file_id": stored_name,
+        "filename": stored_name,
+        "size_bytes": size_bytes,
+        "db_id": db_id,
+    }
 
 @data.get("/graph")
 async def get_graph_info(current_user: User = Depends(get_superadmin_user)):
@@ -309,9 +338,15 @@ async def add_graph_entity(file_path: str = Body(...), kgdb_name: str | None = B
     if not file_path.endswith('.csv'):
         return {"message": "文件格式错误，请上传 csv 文件", "status": "failed"}
 
+    # 只接受通用上传目录内的裸 file_id；绝对路径/盘符/UNC/穿越一律由解析器拒绝
+    try:
+        resolved_path = resolve_upload_path(GENERAL_UPLOAD_DIR, file_path)
+    except UploadError as e:
+        return {"message": e.message, "status": "failed"}
+
     try:
         async with graph_import_gate:
-            await graph_base.jsonl_file_add_entity(file_path, kgdb_name)
+            await graph_base.jsonl_file_add_entity(resolved_path, kgdb_name)
         return {"message": "实体添加成功", "status": "success"}
     except Exception as e:
         logger.error(f"添加实体失败: {e}, {traceback.format_exc()}")
@@ -327,12 +362,11 @@ async def graphfile_handle(request: FileHandleRequest, current_user: User = Depe
     POLL_INTERVAL = 5
     TIMEOUT = 600
     logger.debug(f"graphfile_handle: {file_path}")
-    ROOT_DIR = Path(__file__).resolve().parent.parent.parent
     try:
-        input_file = ROOT_DIR / file_path
+        # 上传接口只回传 file_id（裸存储名），按通用上传目录安全解析；
+        # 绝对路径/盘符/UNC/目录穿越一律由解析器拒绝
+        input_file = Path(resolve_upload_path(GENERAL_UPLOAD_DIR, file_path))
         task_name = input_file.name
-        if not input_file.exists():
-            return {"message": "文件不存在，无法提交"}
 
         loop = asyncio.get_running_loop()
         async with upstream_proxy_gate:

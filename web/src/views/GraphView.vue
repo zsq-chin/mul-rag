@@ -483,7 +483,7 @@ const loadGraphInfo = () => {
 const handleDocumentForGraphrag = async () => {
   const files = graphFileList.value
     .filter(file => file.status === 'done')
-    .map(file => file.response.file_path)
+    .map(file => file.response.file_id)
 
   if (!files.length) {
     alert('没有可处理的文件 ❌')
@@ -709,7 +709,7 @@ const getGraphData = () => {
 
 const addDocumentByFile = () => {
   state.precessing = true
-  const files = fileList.value.filter(file => file.status === 'done').map(file => file.response.file_path)
+  const files = fileList.value.filter(file => file.status === 'done').map(file => file.response.file_id)
   graphApi.addByJsonl(files[0])
     .then((data) => {
       if (data.status === 'success') {

@@ -805,7 +805,7 @@ const getTotalChunks = () => {
 // "生成分块" - 修改后的逻辑
 const chunkFiles = () => {
   console.log("文件列表: ",fileList.value)
-  const files = fileList.value.filter(file => file.status === 'done').map(file => file.response.file_path)
+  const files = fileList.value.filter(file => file.status === 'done').map(file => file.response.file_id)
   console.log(files)
 
   if (files.length === 0) {
