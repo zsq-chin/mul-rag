@@ -110,6 +110,13 @@ export const backupApi = {
   remove: (backupId) => apiDelete(`/api/operations/backups/${backupId}`, {}, true),
 }
 
+/** 本机系统监控（仅 superadmin） */
+export const monitoringApi = {
+  health: () => apiGet('/api/operations/health', {}, true),
+  metrics: () => apiGet('/api/operations/metrics', {}, true),
+  dependencies: () => apiGet('/api/operations/dependencies', {}, true),
+}
+
 /** 统一操作审计（仅 superadmin） */
 export const auditApi = {
   events: (params) => {

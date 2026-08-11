@@ -12,6 +12,7 @@ from server.routers.governance_router import router as governance_router
 from server.routers.evaluation_router import router as evaluation_router
 from server.routers.audit_router import router as audit_router
 from server.routers.operations_router import router as operations_router
+from server.routers.monitoring_router import router as monitoring_router
 
 router = APIRouter()
 router.include_router(base)
@@ -27,3 +28,4 @@ router.include_router(governance_router)
 router.include_router(evaluation_router)
 router.include_router(audit_router)
 router.include_router(operations_router)
+router.include_router(monitoring_router)
