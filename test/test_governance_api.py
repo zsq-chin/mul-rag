@@ -7,11 +7,15 @@ usage_count 服务端自增、JSON/XLSX 导出不含 path。
 
 import os
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError as _SQAError
 from sqlalchemy.orm import sessionmaker
 
 import server.models.governance_model  # noqa: F401
@@ -80,6 +84,20 @@ def _seed(session, data_root, db_id="kb_test", names=("a.pdf", "b.txt"), status=
             )
         )
     session.commit()
+
+
+def _blob_files(data_root):
+    """收集内容寻址 blob 下的已发布文件（排除请求级暂存目录）。"""
+    blobs = os.path.join(data_root, "knowledge_versions", "_blobs")
+    if not os.path.isdir(blobs):
+        return []
+    out = []
+    for root, _dirs, files in os.walk(blobs):
+        if "_staging" in root:
+            continue
+        for name in files:
+            out.append(os.path.join(root, name))
+    return out
 
 
 def _seed_file(session, data_root, db_id, file_id, filename, path, file_type="pdf"):
@@ -223,6 +241,38 @@ class GovernanceServiceTests(unittest.TestCase):
                 # 持久化
                 got = governance_service.get_document(session, "kb_test", "file_a")
                 self.assertEqual(got["confidentiality"], "restricted")
+
+    def test_patch_null_clears_optional_fields(self):
+        """P2-2 验收：显式 null 清空可选字段，重新加载后旧值不保留。"""
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _seed(session, data_root)
+                governance_service.update_governance(
+                    session,
+                    "kb_test",
+                    "file_a",
+                    {
+                        "domain": "石油储运",
+                        "knowledge_type": "标准",
+                        "tags": ["规范", "安全"],
+                        "owner_department": "工程部",
+                        "source_updated_at": datetime(2024, 1, 1, 12, 0, 0),
+                    },
+                )
+                # 明确清空（等价于 PATCH 发送 null）
+                governance_service.update_governance(
+                    session,
+                    "kb_test",
+                    "file_a",
+                    {"domain": None, "tags": None, "owner_department": None, "knowledge_type": None},
+                )
+                reloaded = governance_service.get_document(session, "kb_test", "file_a")
+                self.assertIsNone(reloaded["domain"])
+                self.assertIsNone(reloaded["knowledge_type"])
+                self.assertEqual(reloaded["tags"], [])
+                self.assertIsNone(reloaded["owner_department"])
+                # 未提交的字段不受影响
+                self.assertEqual(reloaded["confidentiality"], "internal")
 
     def test_patch_rejects_invalid_values(self):
         with _temp_db() as (engine, session):
@@ -450,9 +500,10 @@ class GovernanceVersionTests(unittest.TestCase):
                     self.assertEqual(v["created_by"], "admin")
                     self.assertEqual(v["file_size"], len("content a.pdf"))
                     self.assertEqual(len(v["sha256"]), 64)
-                    # 源文件副本位于受控目录
-                    p = os.path.join(data_root, "knowledge_versions", "kb_test", "file_a", "1", "file")
+                    # 源文件副本以内容寻址方式位于受控目录，且校验一致
+                    p = governance_service._blob_path(v["sha256"])
                     self.assertTrue(os.path.isfile(p))
+                    self.assertEqual(governance_service._sha256_file(p), v["sha256"])
                 finally:
                     _restore_roots()
 
@@ -491,14 +542,13 @@ class GovernanceVersionTests(unittest.TestCase):
                     v1 = governance_service.create_snapshot(session, "kb_test", "file_a")
                     v2 = governance_service.create_snapshot(session, "kb_test", "file_a")
                     self.assertTrue(v2["deduplicated"], "相同内容不重复复制")
-                    self.assertFalse(v2["sha256"] != v1["sha256"])
-                    # 版本 2 目录不应有副本文件
-                    v2_dir = os.path.join(data_root, "knowledge_versions", "kb_test", "file_a", "2")
-                    self.assertFalse(os.path.exists(os.path.join(v2_dir, "file")))
-                    # v1 目录有副本
-                    self.assertTrue(
-                        os.path.isfile(os.path.join(
-                            data_root, "knowledge_versions", "kb_test", "file_a", "1", "file"))
+                    self.assertEqual(v2["sha256"], v1["sha256"])
+                    # 内容寻址：两个版本共享同一个 blob，磁盘只有一份，且校验一致
+                    blobs = _blob_files(data_root)
+                    self.assertEqual(len(blobs), 1, "相同内容只应存一份 blob")
+                    self.assertEqual(blobs[0], governance_service._blob_path(v1["sha256"]))
+                    self.assertEqual(
+                        governance_service._sha256_file(blobs[0]), v1["sha256"]
                     )
                 finally:
                     _restore_roots()
@@ -601,6 +651,202 @@ class GovernanceVersionTests(unittest.TestCase):
                 finally:
                     _restore_roots()
 
+    def test_snapshot_copy_failure_leaves_no_version_record(self):
+        """P1-6 验收：复制失败（权限/磁盘满）→ 抛错、版本列表不增加、不留半成品目录。"""
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    with mock.patch.object(
+                        governance_service.shutil, "copy2", side_effect=OSError("权限不足")
+                    ):
+                        with self.assertRaises(GovernanceError):
+                            governance_service.create_snapshot(session, "kb_test", "file_a")
+                    data = governance_service.list_versions(session, "kb_test", "file_a")
+                    self.assertEqual(data["total"], 0)
+                    # 磁盘不留孤儿：无已发布 blob、无残留暂存目录
+                    self.assertEqual(_blob_files(data_root), [])
+                finally:
+                    _restore_roots()
+
+    def test_snapshot_rename_failure_leaves_no_version_record(self):
+        """复制中断（原子改名失败）同样不留可见版本记录。"""
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    with mock.patch.object(
+                        governance_service.os, "replace", side_effect=OSError("写盘失败")
+                    ):
+                        with self.assertRaises(GovernanceError):
+                            governance_service.create_snapshot(session, "kb_test", "file_a")
+                    data = governance_service.list_versions(session, "kb_test", "file_a")
+                    self.assertEqual(data["total"], 0)
+                    # 发布失败 → 版本记录已回滚删除，磁盘不留孤儿 blob / 暂存
+                    self.assertEqual(_blob_files(data_root), [])
+                finally:
+                    _restore_roots()
+
+    def test_snapshot_checksum_mismatch_cleans_up_and_fails(self):
+        """复制出的副本校验不一致 → 抛错、清理临时文件与版本目录。"""
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    real_sha = governance_service._sha256_file
+
+                    def fake_sha(path):
+                        if "knowledge_versions" in str(path):
+                            return "0" * 64
+                        return real_sha(path)
+
+                    with mock.patch.object(governance_service, "_sha256_file", side_effect=fake_sha):
+                        with self.assertRaises(GovernanceError):
+                            governance_service.create_snapshot(session, "kb_test", "file_a")
+                    data = governance_service.list_versions(session, "kb_test", "file_a")
+                    self.assertEqual(data["total"], 0)
+                    # 校验不一致 → 暂存清理，磁盘不留孤儿 blob / 暂存目录
+                    self.assertEqual(_blob_files(data_root), [])
+                finally:
+                    _restore_roots()
+
+    def test_dedup_corrupt_blob_rejected_no_new_record(self):
+        """P1-6 验收：去重引用的既有 blob 已损坏 → 接口失败且版本列表不增加。"""
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    v1 = governance_service.create_snapshot(session, "kb_test", "file_a")
+                    self.assertEqual(v1["version"], 1)
+                    # 破坏既有内容寻址 blob 内容
+                    blob = governance_service._blob_path(v1["sha256"])
+                    self.assertTrue(os.path.isfile(blob))
+                    Path(blob).write_bytes(b"tampered content")
+                    with self.assertRaises(GovernanceError) as ctx:
+                        governance_service.create_snapshot(session, "kb_test", "file_a")
+                    self.assertIn("损坏", str(ctx.exception))
+                    # 版本列表不增加，且不指向损坏 blob
+                    data = governance_service.list_versions(session, "kb_test", "file_a")
+                    self.assertEqual(data["total"], 1)
+                    self.assertEqual(data["items"][0]["version"], 1)
+                finally:
+                    _restore_roots()
+
+    def test_concurrent_two_session_create_no_lost_versions(self):
+        """P1-3：两会话并发创建同一文档快照 → 版本不丢失、不重号、无断链/互删。
+
+        用 barrier 让两个并发请求在计算版本号时同时出发，确定性触发
+        (db_id, file_id, version) 唯一约束冲突 → IntegrityError 重试路径。
+        断言：两个版本都落库且互不相同、都可下载、blob 校验正确、磁盘无孤儿。
+        """
+        with tempfile.TemporaryDirectory() as data_root:
+            _set_roots(data_root)
+            engine = None
+            try:
+                db_path = Path(data_root) / "concurrent.db"
+                engine = create_engine(
+                    f"sqlite:///{db_path}",
+                    connect_args={"timeout": 10, "check_same_thread": False},
+                )
+                # WAL：并发读者/写者不互相阻塞，保证能确定性走到唯一约束冲突
+                with engine.connect() as conn:
+                    conn.execute(text("PRAGMA journal_mode=WAL"))
+                Base.metadata.create_all(engine)
+                s1 = sessionmaker(bind=engine)()
+                s2 = sessionmaker(bind=engine)()
+                _seed(s1, data_root)  # 提交后 s2 可见
+                # 预建治理行，避免两个并发请求同时创建 (db_id,file_id) 唯一行
+                s1.add(KnowledgeGovernance(db_id="kb_test", file_id="file_a"))
+                s1.commit()
+
+                real_next = governance_service._next_version_number
+                gate = threading.Barrier(3)
+                calls = 0
+
+                def synced_next(session, db_id, file_id):
+                    nonlocal calls
+                    if calls < 2:  # 只同步两个线程各自的第一次版本号计算
+                        gate.wait(timeout=10)
+                    calls += 1
+                    return real_next(session, db_id, file_id)
+
+                results = []
+                errors = []
+
+                def worker(session):
+                    try:
+                        with mock.patch.object(
+                            governance_service, "_next_version_number", side_effect=synced_next
+                        ):
+                            results.append(
+                                governance_service.create_snapshot(session, "kb_test", "file_a")
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(exc)
+                    finally:
+                        session.close()
+
+                t1 = threading.Thread(target=worker, args=(s1,))
+                t2 = threading.Thread(target=worker, args=(s2,))
+                t1.start()
+                t2.start()
+                gate.wait(timeout=10)
+                t1.join(timeout=15)
+                t2.join(timeout=15)
+
+                self.assertEqual(errors, [], "并发创建不应失败: {}".format(errors))
+                self.assertEqual(len(results), 2)
+                versions = sorted(v["version"] for v in results)
+                self.assertEqual(versions, [1, 2], "并发创建必须得到两个不同版本号")
+
+                # 版本表与磁盘无断链、无孤儿：每个版本都可解析出校验一致的 blob
+                check = sessionmaker(bind=engine)()
+                rows = (
+                    check.query(KnowledgeDocumentVersion)
+                    .filter_by(db_id="kb_test", file_id="file_a")
+                    .all()
+                )
+                self.assertEqual(len(rows), 2)
+                for r in rows:
+                    p = governance_service._resolve_version_blob(check, "kb_test", "file_a", r)
+                    self.assertIsNotNone(p, "版本 {} 存在断链".format(r.version))
+                    self.assertEqual(governance_service._sha256_file(p), r.sha256)
+                check.close()
+                # 同内容 → 磁盘只有一份共享 blob
+                self.assertEqual(len(_blob_files(data_root)), 1, "并发同内容应共享一个 blob")
+            finally:
+                if engine is not None:
+                    engine.dispose()  # 释放并发测试的 SQLite 文件句柄，避免 Windows 清理失败
+                _restore_roots()
+
+    def test_commit_generic_sqla_error_rolls_back_cleanly(self):
+        """P1-3：普通 SQLAlchemyError 提交失败 → 回滚、清理暂存、不留孤立文件。"""
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    with mock.patch.object(
+                        session, "commit",
+                        side_effect=_SQAError("simulated generic commit failure"),
+                    ):
+                        with self.assertRaises(_SQAError):
+                            governance_service.create_snapshot(session, "kb_test", "file_a")
+                    # 退出 patch 后：无版本记录、无孤儿 blob、会话可继续使用
+                    data = governance_service.list_versions(session, "kb_test", "file_a")
+                    self.assertEqual(data["total"], 0, "提交失败不得留下版本记录")
+                    self.assertEqual(_blob_files(data_root), [], "提交失败不得留下孤儿 blob")
+                    governance_service.create_snapshot(session, "kb_test", "file_a")
+                    self.assertEqual(
+                        governance_service.list_versions(session, "kb_test", "file_a")["total"], 1
+                    )
+                finally:
+                    _restore_roots()
+
 
 class GovernanceRouterSourceTests(unittest.TestCase):
     """router 源码级验证（避免引入 src/Milvus）。"""
@@ -612,6 +858,11 @@ class GovernanceRouterSourceTests(unittest.TestCase):
             / "routers"
             / "governance_router.py"
         ).read_text(encoding="utf-8")
+
+    def test_patch_uses_exclude_unset_to_allow_clearing(self):
+        """P2-2：PATCH 必须区分“未提交”与“明确清空”，允许 null 清空可选字段。"""
+        self.assertIn("model_dump(exclude_unset=True)", self.src)
+        self.assertNotIn("model_dump(exclude_none=True)", self.src)
 
     def test_uses_streaming_response_for_download(self):
         self.assertIn("StreamingResponse", self.src)

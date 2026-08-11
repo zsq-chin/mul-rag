@@ -96,8 +96,9 @@ async def patch_governance_document(
 ):
     """更新治理字段（superadmin）。"""
     try:
+        # exclude_unset 区分“未提交”与“明确清空（null）”，允许清空可选字段
         data = governance_service.update_governance(
-            db, db_id, file_id, payload.model_dump(exclude_none=True)
+            db, db_id, file_id, payload.model_dump(exclude_unset=True)
         )
     except governance_service.GovernanceError as e:
         AuditService.record(

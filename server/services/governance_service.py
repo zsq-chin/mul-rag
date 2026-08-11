@@ -520,15 +520,21 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+def _version_meta(version_row) -> dict:
+    """解析版本记录 metadata_snapshot 为 dict（损坏/非法一律当空处理）。"""
+    if version_row is None or not getattr(version_row, "metadata_snapshot", None):
+        return {}
+    try:
+        parsed = json.loads(version_row.metadata_snapshot)
+        if isinstance(parsed, dict):
+            return parsed
+    except (ValueError, TypeError):
+        pass
+    return {}
+
+
 def _serialize_version(row: KnowledgeDocumentVersion) -> dict:
-    meta = {}
-    if row.metadata_snapshot:
-        try:
-            parsed = json.loads(row.metadata_snapshot)
-            if isinstance(parsed, dict):
-                meta = parsed
-        except (ValueError, TypeError):
-            meta = {}
+    meta = _version_meta(row)
     return {
         "version": row.version,
         "sha256": row.sha256 or "",
@@ -536,7 +542,7 @@ def _serialize_version(row: KnowledgeDocumentVersion) -> dict:
         "created_by": row.created_by,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "note": row.note,
-        "deduplicated": bool(meta.get("blob_version")),
+        "deduplicated": bool(meta.get("deduplicated")),
     }
 
 
@@ -563,6 +569,73 @@ def list_versions(session: Session, db_id: str, file_id: str) -> dict:
     return {"items": [_serialize_version(r) for r in rows], "total": len(rows)}
 
 
+def _blobs_root() -> str:
+    """内容寻址 blob 根目录：knowledge_versions/_blobs/{sha[:2]}/{sha}/file。"""
+    return os.path.join(_versions_root(), "_blobs")
+
+
+def _blob_path(sha256: str) -> str:
+    """按 SHA-256 内容寻址的 blob 路径：同内容同路径，天然去重、绝不互删。"""
+    return os.path.join(_blobs_root(), sha256[:2], sha256, "file")
+
+
+def _staging_root() -> str:
+    """请求级唯一暂存目录：并发请求绝不共享，也绝不会被其它请求删除。
+
+    P1-3：临时资源必须具有请求级唯一名称；失败清理只动自己的目录，
+    绝不能删除其它请求/其它版本的内容。
+    """
+    return os.path.join(_blobs_root(), "_staging", "{}.{}".format(os.getpid(), os.urandom(8).hex()))
+
+
+def _stage_version_tmp(source: str, sha256: str, size: int):
+    """把源文件复制到请求级唯一暂存目录并校验 SHA/大小。
+
+    返回 (staging_dir, tmp_path)。发布（os.replace 到内容寻址路径）由调用方
+    在版本记录提交成功后才执行，因此提交失败绝不会留下孤儿 blob。
+    任何一步失败都清理本请求的暂存目录并抛错。
+    """
+    staging = _staging_root()
+    tmp = os.path.join(staging, "file")
+    try:
+        os.makedirs(staging, exist_ok=True)
+        shutil.copy2(source, tmp)
+        if _sha256_file(tmp) != sha256 or os.path.getsize(tmp) != size:
+            raise GovernanceError("版本文件校验不一致")
+    except Exception as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        if isinstance(exc, GovernanceError):
+            raise
+        logger.warning("版本源文件复制失败: %s", exc)
+        raise GovernanceError("版本源文件复制失败")
+    return staging, tmp
+
+
+def _publish_version_blob(tmp: str, sha256: str) -> None:
+    """把暂存文件原子发布到内容寻址 blob 路径。
+
+    os.replace 原子改名：并发请求即使写到同一 sha 路径，内容也完全一致，
+    最后写入者幂等覆盖，不会产生半文件。
+    """
+    final = _blob_path(sha256)
+    os.makedirs(os.path.dirname(final), exist_ok=True)
+    os.replace(tmp, final)
+
+
+def _next_version_number(session: Session, db_id: str, file_id: str) -> int:
+    """计算下一个版本号（latest + 1）。并发冲突由唯一约束 + 调用方重试兜底。"""
+    latest = (
+        session.query(func.max(KnowledgeDocumentVersion.version))
+        .filter(
+            KnowledgeDocumentVersion.db_id == db_id,
+            KnowledgeDocumentVersion.file_id == file_id,
+        )
+        .scalar()
+        or 0
+    )
+    return latest + 1
+
+
 def create_snapshot(
     session: Session,
     db_id: str,
@@ -570,10 +643,15 @@ def create_snapshot(
     creator: str = "",
     note: str = "",
 ) -> dict:
-    """创建源文件版本快照。
+    """创建源文件版本快照（P1-3 内容寻址重构）。
 
     - 只复制本机源文件到受控版本目录，不修改 Milvus/知识节点/索引。
-    - 相同 SHA-256 不重复复制文件，但记录新的元数据版本（blob_version 指向既有副本）。
+    - 版本文件按 SHA-256 内容寻址：同一内容只存一份 blob，版本记录只引用
+      blob_sha；同内容并发创建写同一个路径且内容一致，互不删除。
+    - 顺序：暂存（请求级唯一目录）→ 提交版本记录 → 发布 blob（原子 os.replace）。
+      提交失败绝不发布，因此不会留下孤儿 blob；发布失败则删除刚提交的记录防断链。
+    - 去重复用时必须确认既有 blob 内容校验一致，损坏的 blob 绝不能被引用。
+    - 所有数据库异常都回滚并清理本请求创建的暂存资源，绝不删除其它请求的内容。
     - 版本号单调递增；并发创建通过唯一约束 + 重试保证不重号。
     """
     db_id = _safe_id(db_id)
@@ -593,84 +671,115 @@ def create_snapshot(
     sha256 = _sha256_file(source)
     size = os.path.getsize(source)
 
-    # 相同内容去重：指向已存在的 blob 版本，不重复复制
-    blob_version = None
-    prior = (
-        session.query(KnowledgeDocumentVersion)
-        .filter(
-            KnowledgeDocumentVersion.db_id == db_id,
-            KnowledgeDocumentVersion.file_id == file_id,
-        )
-        .all()
-    )
-    for p in prior:
-        if p.sha256 == sha256:
-            blob_version = p.version
-            break
+    # 内容寻址去重：blob 存在且校验一致才复用；损坏的既有 blob 直接拒绝
+    final_blob = _blob_path(sha256)
+    reused = os.path.isfile(final_blob)
+    if reused:
+        try:
+            if _sha256_file(final_blob) != sha256:
+                raise GovernanceError("去重引用的既有版本文件已损坏，无法创建快照")
+        except OSError:
+            raise GovernanceError("去重引用的既有版本文件已损坏，无法创建快照")
 
     metadata_snapshot = _serialize_document(file_row, gov, None)
-    snapshot_payload = {"governance": metadata_snapshot}
-    if blob_version is not None:
-        snapshot_payload["blob_version"] = blob_version
+    snapshot_payload = {
+        "governance": metadata_snapshot,
+        "blob_sha": sha256,
+        "deduplicated": bool(reused),
+    }
 
-    for _attempt in range(6):
-        latest = (
-            session.query(func.max(KnowledgeDocumentVersion.version))
-            .filter(
-                KnowledgeDocumentVersion.db_id == db_id,
-                KnowledgeDocumentVersion.file_id == file_id,
+    staging = None
+    tmp = None
+    row = None
+    try:
+        # 新内容：先复制到请求级唯一暂存目录并校验，提交成功后才发布 blob
+        if not reused:
+            staging, tmp = _stage_version_tmp(source, sha256, size)
+        for _attempt in range(6):
+            version = _next_version_number(session, db_id, file_id)
+            row = KnowledgeDocumentVersion(
+                db_id=db_id,
+                file_id=file_id,
+                version=version,
+                sha256=sha256,
+                file_size=size,
+                metadata_snapshot=json.dumps(snapshot_payload, ensure_ascii=False, default=str),
+                created_by=(creator or "")[:100],
+                created_at=None,
+                note=(note or "").strip()[:255],
             )
-            .scalar()
-            or 0
-        )
-        version = latest + 1
-        row = KnowledgeDocumentVersion(
-            db_id=db_id,
-            file_id=file_id,
-            version=version,
-            sha256=sha256,
-            file_size=size,
-            metadata_snapshot=json.dumps(snapshot_payload, ensure_ascii=False, default=str),
-            created_by=(creator or "")[:100],
-            created_at=None,
-            note=(note or "").strip()[:255],
-        )
-        session.add(row)
-        try:
-            session.commit()
+            session.add(row)
+            try:
+                session.commit()
+            except IntegrityError:
+                # 版本号冲突：回滚重试。暂存目录请求级唯一，清理不影响其它请求。
+                session.rollback()
+                row = None
+                continue
             break
-        except IntegrityError:
-            session.rollback()
-            continue
-    else:
-        raise GovernanceError("版本号冲突，请重试")
+        else:
+            raise GovernanceError("版本号冲突，请重试")
 
-    # 只有新内容才复制源文件到受控目录
-    if blob_version is None:
-        target_dir = _version_dir(db_id, file_id, version)
-        os.makedirs(target_dir, exist_ok=True)
+        if not reused:
+            try:
+                _publish_version_blob(tmp, sha256)
+            except Exception as exc:
+                # 发布失败：删除刚提交的版本记录，避免版本表出现断链
+                logger.warning("版本 %d blob 发布失败: %s", version, exc)
+                try:
+                    session.delete(row)
+                    session.commit()
+                except Exception:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+                raise GovernanceError("版本文件发布失败")
+        staging = None
+        tmp = None
+    except GovernanceError:
         try:
-            shutil.copy2(source, os.path.join(target_dir, "file"))
-        except OSError:
-            logger.warning("版本 %d 源文件复制失败: %s", version, file_row.filename)
+            session.rollback()
+        except Exception:
+            pass
+        raise
+    except Exception:
+        # 所有其它数据库异常：回滚并清理本请求暂存资源，不留孤立文件
+        logger.warning("版本记录提交失败，已回滚并清理暂存资源")
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        if staging:
+            shutil.rmtree(staging, ignore_errors=True)
 
     session.refresh(row)
     return _serialize_version(row)
 
 
 def _resolve_version_blob(session: Session, db_id: str, file_id: str, version_row) -> str | None:
-    """解析版本文件的受控路径（跟随 blob_version 去重链，防止越界读取）。"""
+    """解析版本文件的受控路径。
+
+    P1-3 新方案：按 metadata_snapshot 里的 blob_sha 内容寻址（路径 = sha，
+    天然受控）。兼容旧版 blob_version 去重链（老数据仍可下载），
+    任何情况都拒绝越界读取。
+    """
+    meta = _version_meta(version_row)
+    blob_sha = meta.get("blob_sha")
+    if isinstance(blob_sha, str) and len(blob_sha) == 64:
+        candidate = _blob_path(blob_sha)
+        full = os.path.normcase(os.path.realpath(candidate))
+        root = os.path.normcase(os.path.realpath(_versions_root()))
+        if full.startswith(root + os.sep) and os.path.isfile(full):
+            return full
+        return None
+    # 旧版 blob_version 链（向后兼容）
     cur = version_row
     seen = set()
     for _ in range(64):
-        meta = {}
-        if cur.metadata_snapshot:
-            try:
-                parsed = json.loads(cur.metadata_snapshot)
-                if isinstance(parsed, dict):
-                    meta = parsed
-            except (ValueError, TypeError):
-                meta = {}
+        meta = _version_meta(cur)
         target = meta.get("blob_version")
         if target is None:
             break
