@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -10,13 +11,15 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from server.routers import router
+from server.db_manager import db_manager
+from server.services import alert_service
 from server.services.http_clients import (
     close_multimodal_client,
     close_graph_worker_client,
     close_tianshu_client,
 )
 from server.utils.auth_middleware import is_public_path
-from src import shutdown_runtime
+from src import config, shutdown_runtime
 from src.utils.logging_config import logger
 
 # 加载环境变量
@@ -25,12 +28,55 @@ load_dotenv(env_path)
 logger.info(f"加载环境变量文件: {env_path}")
 
 
+async def _run_alert_checker(stop_event: asyncio.Event) -> None:
+    """后台告警检查任务：循环评估告警规则，stop_event 置位后等待当前轮退出。"""
+    def _evaluate() -> None:
+        session = None
+        try:
+            session = db_manager.get_session()
+            ctx = {
+                "db_path": db_manager.db_path,
+                "save_dir": config.save_dir,
+                "milvus_uri": os.getenv("MILVUS_URI", config.get("milvus_uri", "http://milvus:19530")),
+                "neo4j_uri": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
+                "neo4j_username": os.environ.get("NEO4J_USERNAME"),
+                "neo4j_password": os.environ.get("NEO4J_PASSWORD"),
+            }
+
+            def _notify(rule, subject, body, is_resolve):
+                # SMTP 发送失败仅降级，绝不影响监控主流程，也绝不输出密码
+                try:
+                    to = rule.notify_email
+                    if not to:
+                        return
+                    alert_service.send_email(alert_service.smtp_from_env(), to, subject, body)
+                except alert_service.AlertError:
+                    pass
+
+            alert_service.evaluate_rules(session, ctx, notify=_notify)
+        finally:
+            if session is not None:
+                session.close()
+
+    interval = float(os.environ.get("ALERT_CHECK_INTERVAL_SECONDS", "60") or 60)
+    await alert_service.alert_loop(_evaluate, interval=interval, stop=stop_event)
+
+
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
+    alert_stop = asyncio.Event()
+    alert_task = asyncio.create_task(_run_alert_checker(alert_stop))
     try:
         yield
     finally:
+        # 关闭应用：等待告警检查任务退出（限时，超时则取消）
+        alert_stop.set()
+        if alert_task:
+            try:
+                await asyncio.wait_for(alert_task, timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                alert_task.cancel()
         try:
             await close_multimodal_client()
         finally:

@@ -117,6 +117,26 @@ export const monitoringApi = {
   dependencies: () => apiGet('/api/operations/dependencies', {}, true),
 }
 
+/** 邮件告警（仅 superadmin） */
+export const alertApi = {
+  rules: () => apiGet('/api/operations/alert-rules', {}, true),
+  createRule: (payload) => apiPost('/api/operations/alert-rules', payload, {}, true),
+  updateRule: (ruleId, payload) =>
+    apiPatch(`/api/operations/alert-rules/${ruleId}`, payload, {}, true),
+  deleteRule: (ruleId) => apiDelete(`/api/operations/alert-rules/${ruleId}`, {}, true),
+  events: (params) => {
+    const qs = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''),
+      ),
+    ).toString()
+    return apiGet(`/api/operations/alert-events?${qs}`, {}, true)
+  },
+  acknowledge: (eventId) =>
+    apiPost(`/api/operations/alert-events/${eventId}/acknowledge`, {}, {}, true),
+  testEmail: (toEmail) => apiPost('/api/operations/email/test', { to_email: toEmail }, {}, true),
+}
+
 /** 统一操作审计（仅 superadmin） */
 export const auditApi = {
   events: (params) => {
