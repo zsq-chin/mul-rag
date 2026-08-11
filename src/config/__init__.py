@@ -1,10 +1,24 @@
 import os
 import json
+import secrets
 import yaml
 from pathlib import Path
 from src.utils.logging_config import logger
 
 DEFAULT_MOCK_API = 'this_is_mock_api_key_in_frontend'
+
+
+def _atomic_write(path, content):
+    """临时文件 + os.replace 原子写，避免写一半崩溃留下损坏的配置文件。
+
+    P2-1：临时名加入 PID 与随机值，同一进程多线程并发写配置时不再竞争
+    同一个临时文件（旧实现共享 {path}.tmp.{pid}，并发时后到的 os.replace
+    会因临时文件已被移走而抛 FileNotFoundError）。
+    """
+    tmp = f"{path}.tmp.{os.getpid()}.{secrets.token_hex(4)}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp, path)
 
 
 # SimpleConfig 类 - 基础配置字典类
@@ -304,16 +318,15 @@ class Config(SimpleConfig):
             self.filename = os.path.join(self.save_dir, "config", "base.yaml")
             os.makedirs(os.path.dirname(self.filename), exist_ok=True)
 
+        payload = self.__dict__()
         if self.filename.endswith(".json"):
-            with open(self.filename, 'w+') as f:
-                json.dump(self.__dict__(), f, indent=4, ensure_ascii=False)
+            content = json.dumps(payload, indent=4, ensure_ascii=False)
         elif self.filename.endswith(".yaml"):
-            with open(self.filename, 'w+') as f:
-                yaml.dump(self.__dict__(), f, indent=2, allow_unicode=True)
+            content = yaml.dump(payload, indent=2, allow_unicode=True)
         else:
             logger.warning(f"Unknown config file type {self.filename}, save as json")
-            with open(self.filename, 'w+') as f:
-                json.dump(self, f, indent=4)
+            content = json.dumps(payload, indent=4)
+        _atomic_write(self.filename, content)
 
         logger.info(f"Config file {self.filename} saved")
 

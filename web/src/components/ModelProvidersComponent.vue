@@ -114,7 +114,12 @@
           <a-input v-model:value="customModel.api_base" />
         </a-form-item>
         <a-form-item label="API KEY" name="api_key">
-          <a-input-password v-model:value="customModel.api_key" :visibilityToggle="true" autocomplete="new-password"/>
+          <a-input-password
+            v-model:value="customModel.api_key"
+            :visibilityToggle="true"
+            autocomplete="new-password"
+            :placeholder="customModel.has_api_key ? '已配置密钥，留空则保留原密钥' : '请输入 API KEY'"
+          />
         </a-form-item>
       </a-form>
     </a-modal>
@@ -217,6 +222,7 @@ const customModel = reactive({
   api_key: '',
   api_base: '',
   edit_type: 'add',
+  has_api_key: false,
 });
 
 // 提供商配置相关状态
@@ -276,7 +282,9 @@ const prepareToEditCustomModel = (item) => {
   customModel.visible = true;
   customModel.edit_type = 'edit';
   customModel.name = item.name;
-  customModel.api_key = item.api_key;
+  // 后端一律不回显真实 API Key；留空表示保留原密钥（服务层合并）
+  customModel.api_key = '';
+  customModel.has_api_key = !!item.has_api_key;
   customModel.api_base = item.api_base;
 };
 
@@ -294,6 +302,7 @@ const clearCustomModel = () => {
   customModel.name = '';
   customModel.api_key = '';
   customModel.api_base = '';
+  customModel.has_api_key = false;
 };
 
 // 取消自定义模型添加/编辑

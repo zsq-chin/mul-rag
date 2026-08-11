@@ -36,10 +36,8 @@ async def health_check():
 # Depends = “告诉 FastAPI：在调用我之前，先帮我执行这个依赖函数，并把结果传给我”。
 @base.get("/config")
 def get_config(current_user: User = Depends(get_superadmin_user)):
-    # 统一脱敏：顶层秘密键脱敏，但保留 custom_models 真实 api_key 供前端编辑回显
-    return config_service.sanitize_config_snapshot(
-        config.dump_config(), redact_custom_models=False
-    )
+    # 统一脱敏：任何配置响应都不返回真实 API Key（custom_models 仅返回 has_api_key/key_hint）
+    return config_service.sanitize_config_snapshot(config.dump_config())
 
 
 def _apply_and_respond(db, items, user_id, operator, description, request, action):
@@ -65,9 +63,7 @@ def _apply_and_respond(db, items, user_id, operator, description, request, actio
         ip=_client_ip(request),
     )
     # 保持原有返回形态（前端 setConfig 直接消费该字典），追加变更元信息
-    snapshot = config_service.sanitize_config_snapshot(
-        config.dump_config(), redact_custom_models=False
-    )
+    snapshot = config_service.sanitize_config_snapshot(config.dump_config())
     snapshot["change_id"] = result["change_id"]
     snapshot["changed_keys"] = result["changed_keys"]
     snapshot["restart_components"] = result["restart_components"]
@@ -154,9 +150,7 @@ async def rollback_config(
         detail={"count": len(result["rolled_back_keys"]), "reason": (description or "")[:200]},
         ip=_client_ip(request),
     )
-    snapshot = config_service.sanitize_config_snapshot(
-        config.dump_config(), redact_custom_models=False
-    )
+    snapshot = config_service.sanitize_config_snapshot(config.dump_config())
     snapshot["change_id"] = result["change_id"]
     snapshot["rolled_back_keys"] = result["rolled_back_keys"]
     snapshot["restart_components"] = result["restart_components"]
