@@ -10,6 +10,7 @@ from server.routers.user_model_router import user_models
 from server.routers.feedback_router import router as feedback_router
 from server.routers.governance_router import router as governance_router
 from server.routers.evaluation_router import router as evaluation_router
+from server.routers.audit_router import router as audit_router
 
 router = APIRouter()
 router.include_router(base)
@@ -23,3 +24,4 @@ router.include_router(user_models)
 router.include_router(feedback_router)
 router.include_router(governance_router)
 router.include_router(evaluation_router)
+router.include_router(audit_router)

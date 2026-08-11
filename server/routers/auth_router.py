@@ -9,6 +9,7 @@ import secrets
 from server.db_manager import db_manager
 from server.models.user_model import User, OperationLog
 from server.models.cas_session_model import CASSession
+from server.services.audit_service import AuditService
 from server.utils.auth_utils import AuthUtils
 from server.utils.auth_middleware import get_db, get_current_user, get_required_user, get_admin_user, get_superadmin_user, oauth2_scheme
 from server.services.access_control import (
@@ -100,14 +101,22 @@ def log_operation(db: Session, user_id: int, operation: str, details: str = None
 @auth.post("/token", response_model=Token)
 async def login_for_access_token(
     # 自动解析请求中的用户名密码表单无需手动解析
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
+    ip_address = request.client.host if request.client else None
     # 查找用户
     user = db.query(User).filter(User.username == form_data.username).first()
 
     # 验证用户存在且密码正确
     if not user or not AuthUtils.verify_password(user.password_hash, form_data.password):
+        # 仅当用户存在（密码错误）时记录失败登录，避免 user_id 为空违反外键
+        if user is not None:
+            AuditService.record(
+                "auth.login", user_id=user.id, status="failed",
+                detail={"username": user.username, "reason": "wrong_password"}, ip=ip_address,
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
@@ -116,6 +125,10 @@ async def login_for_access_token(
 
     # 检查是否为CAS用户（CAS用户不能使用密码登录）
     if user.is_cas_user:
+        AuditService.record(
+            "auth.login", user_id=user.id, status="failed",
+            detail={"username": user.username, "reason": "cas_only"}, ip=ip_address,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="在校老师或学生请使用统一身份认证登录",
@@ -132,6 +145,10 @@ async def login_for_access_token(
 
     # 记录登录操作
     log_operation(db, user.id, "登录")
+    AuditService.record(
+        "auth.login", user_id=user.id, status="success",
+        detail={"username": user.username, "role": user.role}, ip=ip_address,
+    )
 
     return {
         "access_token": access_token,
@@ -428,6 +445,14 @@ async def create_user(
         f"创建用户: {user_data.username}, 角色: {user_data.role}",
         request
     )
+    AuditService.record(
+        "user.create",
+        user_id=current_user.id,
+        resource_type="user",
+        resource_id=new_user.id,
+        detail={"username": user_data.username, "role": role},
+        ip=request.client.host if request.client else None,
+    )
 
     return new_user.to_dict()
 
@@ -524,6 +549,14 @@ async def update_user(
         f"更新用户ID {user_id}: {', '.join(update_details)}",
         request
     )
+    AuditService.record(
+        "user.update",
+        user_id=current_user.id,
+        resource_type="user",
+        resource_id=user_id,
+        detail={"username": user.username, "role": user.role},
+        ip=request.client.host if request.client else None,
+    )
 
     return user.to_dict()
 
@@ -579,6 +612,14 @@ async def delete_user(
         "删除用户",
         f"删除用户: {user.username}, ID: {user.id}, 角色: {user.role}",
         request
+    )
+    AuditService.record(
+        "user.delete",
+        user_id=current_user.id,
+        resource_type="user",
+        resource_id=user.id,
+        detail={"username": user.username, "role": user.role},
+        ip=request.client.host if request.client else None,
     )
 
     # 删除用户

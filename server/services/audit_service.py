@@ -12,7 +12,45 @@ import json
 import logging
 import re
 
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
 logger = logging.getLogger("sage.audit")
+
+# 已知动作码词汇表（GET /api/audit/actions 返回）。
+# 覆盖计划要求的全部动作码，外加本项目实际写入的扩展动作码。
+KNOWN_ACTIONS = [
+    "auth.login",
+    "user.create",
+    "user.update",
+    "user.delete",
+    "model.create",
+    "model.update",
+    "model.delete",
+    "model.select",
+    "knowledge.upload",
+    "knowledge.delete",
+    "knowledge.metadata.update",
+    "knowledge.download",
+    "knowledge.export",
+    "knowledge.sync",
+    "knowledge.version.snapshot",
+    "feedback.upsert",
+    "feedback.delete",
+    "evaluation.suite.create",
+    "evaluation.suite.update",
+    "evaluation.suite.delete",
+    "evaluation.case.create",
+    "evaluation.case.update",
+    "evaluation.case.delete",
+    "evaluation.import",
+    "config.update",
+    "config.rollback",
+    "backup.create",
+    "backup.restore",
+    "alert.rule.update",
+    "alert.email.test",
+]
 # 说明：使用标准 logging 而非 src.utils.logging_config.logger，
 # 避免模块导入即触发 src/__init__（Milvus 连接），保证本地可测试性。
 # 应用内已配置日志处理器，本 logger 自动继承。
@@ -26,6 +64,7 @@ AUDIT_DETAIL_WHITELIST = frozenset({
     "role",
     "model_name",
     "model_base",
+    "api_base",
     "filename",
     "file_id",
     "db_id",
@@ -147,3 +186,93 @@ class AuditService:
                     session.close()
                 except Exception:
                     pass
+
+
+# --- 只读查询（供 /api/audit 接口使用，db 由调用方注入） ---
+
+
+def _parse_details(raw) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def serialize_event(row, username=None) -> dict:
+    """把 OperationLog 行序列化为审计事件。details 内的 status/resource 提升到顶层。"""
+    details = _parse_details(getattr(row, "details", None))
+    return {
+        "id": row.id,
+        "user_id": row.user_id,
+        "username": username,
+        "action": row.operation,
+        "status": details.get("status", "success"),
+        "resource_type": details.get("resource_type"),
+        "resource_id": details.get("resource_id"),
+        "details": details,
+        "ip_address": row.ip_address,
+        "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+    }
+
+
+def list_events(
+    db: Session,
+    user: str = "",
+    action: str = "",
+    resource_type: str = "",
+    status: str = "",
+    start=None,
+    end=None,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    """筛选分页查询审计事件。user 按用户名模糊匹配，其余字段精确匹配。"""
+    from server.models.user_model import OperationLog, User
+
+    query = db.query(OperationLog, User.username).join(User, OperationLog.user_id == User.id)
+    if user:
+        query = query.filter(User.username.ilike(f"%{user}%"))
+    if action:
+        query = query.filter(OperationLog.operation == action)
+    if resource_type:
+        query = query.filter(func.json_extract(OperationLog.details, "$.resource_type") == resource_type)
+    if status:
+        query = query.filter(func.json_extract(OperationLog.details, "$.status") == status)
+    if start is not None:
+        query = query.filter(OperationLog.timestamp >= start)
+    if end is not None:
+        query = query.filter(OperationLog.timestamp <= end)
+
+    total = query.count()
+    rows = (
+        query.order_by(OperationLog.timestamp.desc(), OperationLog.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    items = [serialize_event(log, username) for log, username in rows]
+    return {"items": items, "page": page, "page_size": page_size, "total": total}
+
+
+def get_event(db: Session, event_id: int):
+    """按 ID 查询单条审计事件；不存在返回 None。"""
+    from server.models.user_model import OperationLog, User
+
+    row = (
+        db.query(OperationLog, User.username)
+        .join(User, OperationLog.user_id == User.id)
+        .filter(OperationLog.id == event_id)
+        .first()
+    )
+    if row is None:
+        return None
+    log, username = row
+    return serialize_event(log, username)
+
+
+def list_actions() -> list:
+    """返回已知动作码词汇表。"""
+    return list(KNOWN_ACTIONS)

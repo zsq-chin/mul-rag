@@ -81,6 +81,20 @@ export const evaluationApi = {
     `/api/evaluation/suites/${suiteId}/export?format=${format}`,
 }
 
+/** 统一操作审计（仅 superadmin） */
+export const auditApi = {
+  events: (params) => {
+    const qs = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''),
+      ),
+    ).toString()
+    return apiGet(`/api/audit/events?${qs}`, {}, true)
+  },
+  event: (eventId) => apiGet(`/api/audit/events/${eventId}`, {}, true),
+  actions: () => apiGet('/api/audit/actions', {}, true),
+}
+
 /**
  * 带认证头的 multipart 上传（导入用例用）。
  * 返回解析后的 JSON；非 2xx 抛错。

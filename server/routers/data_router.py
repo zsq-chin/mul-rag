@@ -7,12 +7,13 @@ import httpx
 
 from pydantic import BaseModel
 from fastapi import Response
-from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Body, Query, Header
+from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Body, Query, Header, Request
 from urllib.parse import quote
 from starlette.responses import StreamingResponse
 
 from src.utils import logger, hashstr
 from src import executor, retriever, config, knowledge_base, graph_base
+from server.services.audit_service import AuditService
 from server.utils.auth_middleware import get_required_user, get_superadmin_user
 from server.models.user_model import User
 from server.services.graph_import import GraphImportService, internal_token_matches, resolve_import_artifact
@@ -199,10 +200,18 @@ async def get_database_info(db_id: str, current_user: User = Depends(get_superad
     return database
 
 @data.delete("/document")
-async def delete_document(db_id: str = Body(...), file_id: str = Body(...), current_user: User = Depends(get_superadmin_user)):
+async def delete_document(db_id: str = Body(...), file_id: str = Body(...), request: Request = None, current_user: User = Depends(get_superadmin_user)):
     logger.debug(f"DELETE document {file_id} info in {db_id}")
     async with retrieval_gate:
         await _run_blocking(knowledge_base.delete_file, db_id, file_id)
+    AuditService.record(
+        "knowledge.delete",
+        user_id=current_user.id,
+        resource_type="knowledge_file",
+        resource_id=file_id,
+        detail={"file_id": file_id, "db_id": db_id},
+        ip=request.client.host if request and request.client else None,
+    )
     return {"message": "删除成功"}
 
 @data.get("/document")
@@ -222,6 +231,7 @@ async def get_document_info(db_id: str, file_id: str, current_user: User = Depen
 async def upload_file(
     file: UploadFile = File(...),
     db_id: str | None = Query(None),
+    request: Request = None,
     current_user: User = Depends(get_superadmin_user)
 ):
     if not file.filename:
@@ -242,6 +252,14 @@ async def upload_file(
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
 
+    AuditService.record(
+        "knowledge.upload",
+        user_id=current_user.id,
+        resource_type="knowledge_file",
+        resource_id=filename,
+        detail={"filename": file.filename, "db_id": db_id},
+        ip=request.client.host if request and request.client else None,
+    )
     return {"message": "File successfully uploaded", "file_path": file_path, "db_id": db_id}
 
 @data.get("/graph")

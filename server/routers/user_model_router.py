@@ -2,11 +2,12 @@ import logging
 from typing import Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy.orm import Session
 
 from server.models.user_model import User
+from server.services.audit_service import AuditService
 from server.services.model_credentials import (
     CredentialCipher,
     create_user_model,
@@ -79,6 +80,7 @@ async def get_user_models(
 @user_models.post("", response_model=UserModelResponse, status_code=status.HTTP_201_CREATED)
 async def add_user_model(
     payload: UserModelCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_required_user),
 ):
@@ -86,6 +88,15 @@ async def add_user_model(
         model = create_user_model(db, current_user, payload, _cipher_or_503())
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from None
+    AuditService.record(
+        "model.create",
+        user_id=current_user.id,
+        resource_type="user_model",
+        resource_id=model.id,
+        status="success",
+        detail={"model_name": payload.model_name, "api_base": payload.api_base},
+        ip=request.client.host if request.client else None,
+    )
     return serialize_user_model(model)
 
 
@@ -93,6 +104,7 @@ async def add_user_model(
 async def edit_user_model(
     model_id: int,
     payload: UserModelUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_required_user),
 ):
@@ -100,26 +112,55 @@ async def edit_user_model(
         model = update_user_model(db, current_user, model_id, payload, _cipher_or_503())
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from None
+    AuditService.record(
+        "model.update",
+        user_id=current_user.id,
+        resource_type="user_model",
+        resource_id=model_id,
+        status="success",
+        detail={"model_name": model.model_name, "api_base": model.api_base},
+        ip=request.client.host if request.client else None,
+    )
     return serialize_user_model(model)
 
 
 @user_models.delete("/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_user_model(
     model_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_required_user),
 ):
     delete_user_model(db, current_user, model_id)
+    AuditService.record(
+        "model.delete",
+        user_id=current_user.id,
+        resource_type="user_model",
+        resource_id=model_id,
+        status="success",
+        ip=request.client.host if request.client else None,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @user_models.post("/{model_id}/select", response_model=UserModelResponse)
 async def mark_user_model_selected(
     model_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_required_user),
 ):
-    return serialize_user_model(select_user_model(db, current_user, model_id))
+    model = select_user_model(db, current_user, model_id)
+    AuditService.record(
+        "model.select",
+        user_id=current_user.id,
+        resource_type="user_model",
+        resource_id=model_id,
+        status="success",
+        detail={"model_name": model.model_name, "api_base": model.api_base},
+        ip=request.client.host if request.client else None,
+    )
+    return serialize_user_model(model)
 
 
 @user_models.post("/validate")
