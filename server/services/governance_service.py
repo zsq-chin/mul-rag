@@ -10,16 +10,19 @@
 - usage_count 只能由服务端更新（预览/下载时自增）。
 """
 
+import hashlib
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from sqlalchemy import and_, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from server.models.kb_models import KnowledgeDatabase, KnowledgeFile, KnowledgeNode
-from server.models.governance_model import KnowledgeGovernance
+from server.models.governance_model import KnowledgeDocumentVersion, KnowledgeGovernance
 
 logger = logging.getLogger("sage.governance")
 
@@ -442,6 +445,24 @@ def media_type_for(extension: str) -> str:
     return _MEDIA_TYPES.get((extension or "").lower(), "application/octet-stream")
 
 
+def _authorize_download(gov, user):
+    """下载权限矩阵：restricted 仅 superadmin；download_allowed=0 一律拒绝。"""
+    conf = gov.confidentiality or "internal"
+    if conf not in VALID_CONFIDENTIALITY:
+        conf = "internal"
+    role = getattr(user, "role", "") or ""
+    if conf == "restricted" and role != "superadmin":
+        raise GovernanceForbidden("restricted 文档仅超级管理员可下载")
+    if not gov.download_allowed:
+        raise GovernanceForbidden("该文档已禁止下载")
+    return conf
+
+
+def _increment_usage(session, gov):
+    gov.usage_count = (gov.usage_count or 0) + 1
+    session.commit()
+
+
 def resolve_download(session: Session, db_id: str, file_id: str, user) -> dict:
     """下载前鉴权与路径解析。
 
@@ -461,22 +482,13 @@ def resolve_download(session: Session, db_id: str, file_id: str, user) -> dict:
     if file_row is None:
         raise GovernanceNotFound("文档不存在")
     gov = _get_or_create_governance(session, db_id, file_id, source_updated_at=file_row.created_at)
-
-    conf = gov.confidentiality or "internal"
-    if conf not in VALID_CONFIDENTIALITY:
-        conf = "internal"
-    role = getattr(user, "role", "") or ""
-    if conf == "restricted" and role != "superadmin":
-        raise GovernanceForbidden("restricted 文档仅超级管理员可下载")
-    if not gov.download_allowed:
-        raise GovernanceForbidden("该文档已禁止下载")
+    _authorize_download(gov, user)
 
     abs_path = _resolve_download_path(file_row.path)
     if abs_path is None:
         raise GovernanceNotFound("源文件不存在或不可访问")
 
-    gov.usage_count = (gov.usage_count or 0) + 1
-    session.commit()
+    _increment_usage(session, gov)
 
     filename = file_row.filename or f"file_{file_row.file_id}"
     return {
@@ -486,4 +498,248 @@ def resolve_download(session: Session, db_id: str, file_id: str, user) -> dict:
         "extension": os.path.splitext(filename)[1].lstrip(".").lower(),
         "db_id": db_id,
         "file_id": file_id,
+    }
+
+
+# --- 版本快照 ---
+
+
+def _versions_root() -> str:
+    return os.path.join(DATA_ROOT, "knowledge_versions")
+
+
+def _version_dir(db_id: str, file_id: str, version: int) -> str:
+    return os.path.join(_versions_root(), db_id, file_id, str(version))
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _serialize_version(row: KnowledgeDocumentVersion) -> dict:
+    meta = {}
+    if row.metadata_snapshot:
+        try:
+            parsed = json.loads(row.metadata_snapshot)
+            if isinstance(parsed, dict):
+                meta = parsed
+        except (ValueError, TypeError):
+            meta = {}
+    return {
+        "version": row.version,
+        "sha256": row.sha256 or "",
+        "file_size": row.file_size,
+        "created_by": row.created_by,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "note": row.note,
+        "deduplicated": bool(meta.get("blob_version")),
+    }
+
+
+def list_versions(session: Session, db_id: str, file_id: str) -> dict:
+    """按版本倒序返回该文档的版本历史。"""
+    db_id = _safe_id(db_id)
+    file_id = _safe_id(file_id)
+    file_row = (
+        session.query(KnowledgeFile)
+        .filter(KnowledgeFile.database_id == db_id, KnowledgeFile.file_id == file_id)
+        .first()
+    )
+    if file_row is None:
+        raise GovernanceNotFound("文档不存在")
+    rows = (
+        session.query(KnowledgeDocumentVersion)
+        .filter(
+            KnowledgeDocumentVersion.db_id == db_id,
+            KnowledgeDocumentVersion.file_id == file_id,
+        )
+        .order_by(KnowledgeDocumentVersion.version.desc())
+        .all()
+    )
+    return {"items": [_serialize_version(r) for r in rows], "total": len(rows)}
+
+
+def create_snapshot(
+    session: Session,
+    db_id: str,
+    file_id: str,
+    creator: str = "",
+    note: str = "",
+) -> dict:
+    """创建源文件版本快照。
+
+    - 只复制本机源文件到受控版本目录，不修改 Milvus/知识节点/索引。
+    - 相同 SHA-256 不重复复制文件，但记录新的元数据版本（blob_version 指向既有副本）。
+    - 版本号单调递增；并发创建通过唯一约束 + 重试保证不重号。
+    """
+    db_id = _safe_id(db_id)
+    file_id = _safe_id(file_id)
+    file_row = (
+        session.query(KnowledgeFile)
+        .filter(KnowledgeFile.database_id == db_id, KnowledgeFile.file_id == file_id)
+        .first()
+    )
+    if file_row is None:
+        raise GovernanceNotFound("文档不存在")
+    source = _resolve_download_path(file_row.path)
+    if source is None:
+        raise GovernanceNotFound("源文件不存在或不可访问")
+
+    gov = _get_or_create_governance(session, db_id, file_id, source_updated_at=file_row.created_at)
+    sha256 = _sha256_file(source)
+    size = os.path.getsize(source)
+
+    # 相同内容去重：指向已存在的 blob 版本，不重复复制
+    blob_version = None
+    prior = (
+        session.query(KnowledgeDocumentVersion)
+        .filter(
+            KnowledgeDocumentVersion.db_id == db_id,
+            KnowledgeDocumentVersion.file_id == file_id,
+        )
+        .all()
+    )
+    for p in prior:
+        if p.sha256 == sha256:
+            blob_version = p.version
+            break
+
+    metadata_snapshot = _serialize_document(file_row, gov, None)
+    snapshot_payload = {"governance": metadata_snapshot}
+    if blob_version is not None:
+        snapshot_payload["blob_version"] = blob_version
+
+    for _attempt in range(6):
+        latest = (
+            session.query(func.max(KnowledgeDocumentVersion.version))
+            .filter(
+                KnowledgeDocumentVersion.db_id == db_id,
+                KnowledgeDocumentVersion.file_id == file_id,
+            )
+            .scalar()
+            or 0
+        )
+        version = latest + 1
+        row = KnowledgeDocumentVersion(
+            db_id=db_id,
+            file_id=file_id,
+            version=version,
+            sha256=sha256,
+            file_size=size,
+            metadata_snapshot=json.dumps(snapshot_payload, ensure_ascii=False, default=str),
+            created_by=(creator or "")[:100],
+            created_at=None,
+            note=(note or "").strip()[:255],
+        )
+        session.add(row)
+        try:
+            session.commit()
+            break
+        except IntegrityError:
+            session.rollback()
+            continue
+    else:
+        raise GovernanceError("版本号冲突，请重试")
+
+    # 只有新内容才复制源文件到受控目录
+    if blob_version is None:
+        target_dir = _version_dir(db_id, file_id, version)
+        os.makedirs(target_dir, exist_ok=True)
+        try:
+            shutil.copy2(source, os.path.join(target_dir, "file"))
+        except OSError:
+            logger.warning("版本 %d 源文件复制失败: %s", version, file_row.filename)
+
+    session.refresh(row)
+    return _serialize_version(row)
+
+
+def _resolve_version_blob(session: Session, db_id: str, file_id: str, version_row) -> str | None:
+    """解析版本文件的受控路径（跟随 blob_version 去重链，防止越界读取）。"""
+    cur = version_row
+    seen = set()
+    for _ in range(64):
+        meta = {}
+        if cur.metadata_snapshot:
+            try:
+                parsed = json.loads(cur.metadata_snapshot)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except (ValueError, TypeError):
+                meta = {}
+        target = meta.get("blob_version")
+        if target is None:
+            break
+        if target in seen:
+            return None
+        seen.add(target)
+        nxt = (
+            session.query(KnowledgeDocumentVersion)
+            .filter(
+                KnowledgeDocumentVersion.db_id == db_id,
+                KnowledgeDocumentVersion.file_id == file_id,
+                KnowledgeDocumentVersion.version == int(target),
+            )
+            .first()
+        )
+        if nxt is None:
+            return None
+        cur = nxt
+    candidate = os.path.join(_version_dir(db_id, file_id, cur.version), "file")
+    full = os.path.normcase(os.path.realpath(candidate))
+    root = os.path.normcase(os.path.realpath(_versions_root()))
+    if not full.startswith(root + os.sep):
+        return None
+    if not os.path.isfile(full):
+        return None
+    return full
+
+
+def resolve_version_download(
+    session: Session, db_id: str, file_id: str, version: int, user
+) -> dict:
+    """版本受控下载：权限同文档下载；只从受控版本目录读取。"""
+    db_id = _safe_id(db_id)
+    file_id = _safe_id(file_id)
+    file_row = (
+        session.query(KnowledgeFile)
+        .filter(KnowledgeFile.database_id == db_id, KnowledgeFile.file_id == file_id)
+        .first()
+    )
+    if file_row is None:
+        raise GovernanceNotFound("文档不存在")
+    version_row = (
+        session.query(KnowledgeDocumentVersion)
+        .filter(
+            KnowledgeDocumentVersion.db_id == db_id,
+            KnowledgeDocumentVersion.file_id == file_id,
+            KnowledgeDocumentVersion.version == version,
+        )
+        .first()
+    )
+    if version_row is None:
+        raise GovernanceNotFound("版本不存在")
+
+    gov = _get_or_create_governance(session, db_id, file_id, source_updated_at=file_row.created_at)
+    _authorize_download(gov, user)
+
+    abs_path = _resolve_version_blob(session, db_id, file_id, version_row)
+    if abs_path is None:
+        raise GovernanceNotFound("版本文件不存在或不可访问")
+
+    _increment_usage(session, gov)
+
+    filename = file_row.filename or f"file_{file_row.file_id}"
+    return {
+        "abs_path": abs_path,
+        "filename": filename,
+        "size_bytes": os.path.getsize(abs_path),
+        "extension": os.path.splitext(filename)[1].lstrip(".").lower(),
+        "db_id": db_id,
+        "file_id": file_id,
+        "version": version,
     }

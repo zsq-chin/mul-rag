@@ -85,3 +85,29 @@ test('governance panel is embedded in the database info view for superadmin only
   assert.match(dbInfoView, /key="governance" v-if="userStore\.isSuperAdmin"/)
   assert.match(dbInfoView, /SafetyCertificateOutlined/)
 })
+
+test('governance version APIs hit the right endpoints with auth', () => {
+  assert.match(localFeatures, /versions: \(dbId, fileId\) =>/)
+  assert.match(localFeatures, /apiGet\(`\/api\/governance\/databases\/\$\{dbId\}\/documents\/\$\{fileId\}\/versions`, \{\}, true\)/)
+  assert.match(localFeatures, /snapshot: \(dbId, fileId, note\) =>/)
+  assert.match(localFeatures, /apiPost\(`\/api\/governance\/databases\/\$\{dbId\}\/documents\/\$\{fileId\}\/versions\/snapshot`, \{ note \}, \{\}, true\)/)
+  assert.match(localFeatures, /versionDownloadUrl: \(dbId, fileId, version\) =>/)
+  assert.match(localFeatures, /`\/api\/governance\/databases\/\$\{dbId\}\/documents\/\$\{fileId\}\/versions\/\$\{version\}\/download`/)
+})
+
+test('governance panel shows version history with snapshot and download', () => {
+  assert.match(panel, /handleVersions\(record\)/)
+  assert.match(panel, /governanceApi\.versions\(props\.dbId, versionsFile\.value\.file_id\)/)
+  assert.match(panel, /handleSnapshot\(\)/)
+  assert.match(panel, /governanceApi\.snapshot\(props\.dbId, versionsFile\.value\.file_id, snapshotNote\.value\)/)
+  assert.match(panel, /handleVersionDownload\(record\)/)
+  assert.match(panel, /governanceApi\.versionDownloadUrl\(props\.dbId, versionsFile\.value\.file_id, record\.version\)/)
+  assert.match(panel, /v-model:open="versionsVisible"/)
+  assert.match(panel, /versionColumns/)
+})
+
+test('version panel disclaims reindex is not included', () => {
+  // 明确标注恢复检索需要后续索引版本功能
+  assert.match(panel, /恢复检索版本需要后续索引版本功能/)
+  assert.match(panel, /不重建知识索引/)
+})

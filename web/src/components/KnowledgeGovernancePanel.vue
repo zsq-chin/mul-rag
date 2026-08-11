@@ -65,6 +65,7 @@
         <template v-else-if="column.key === 'action'">
           <a-button type="link" @click="handleEdit(record)">编辑</a-button>
           <a-button type="link" @click="handleDownload(record)">下载</a-button>
+          <a-button type="link" @click="handleVersions(record)">版本</a-button>
         </template>
       </template>
     </a-table>
@@ -129,6 +130,50 @@
         <a-descriptions-item label="责任部门">{{ preview.owner_department || '-' }}</a-descriptions-item>
         <a-descriptions-item label="来源更新时间">{{ preview.source_updated_at || '-' }}</a-descriptions-item>
       </a-descriptions>
+    </a-modal>
+
+    <!-- 文档版本历史 -->
+    <a-modal
+      v-model:open="versionsVisible"
+      :title="`版本历史：${versionsFile?.filename || ''}`"
+      width="760px"
+      :footer="null"
+    >
+      <a-alert
+        type="info"
+        show-icon
+        message="恢复检索版本需要后续索引版本功能，当前仅保存源文件快照，不重建知识索引。"
+        style="margin-bottom: 12px"
+      />
+      <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center;">
+        <a-input v-model:value="snapshotNote" placeholder="版本说明（可选）" style="width: 280px" />
+        <a-button type="primary" @click="handleSnapshot" :loading="snapshotting">创建快照</a-button>
+      </div>
+      <a-table
+        :columns="versionColumns"
+        :data-source="versions"
+        row-key="version"
+        size="small"
+        :pagination="false"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'version'">v{{ record.version }}</template>
+          <template v-else-if="column.key === 'sha256'">
+            <span class="mono">{{ record.sha256 ? record.sha256.slice(0, 12) : '-' }}</span>
+            <a-tag v-if="record.deduplicated" color="orange" style="margin-left: 6px">去重</a-tag>
+          </template>
+          <template v-else-if="column.key === 'created_at'">
+            {{ record.created_at || '-' }}
+          </template>
+          <template v-else-if="column.key === 'action'">
+            <a-button
+              type="link"
+              size="small"
+              @click="handleVersionDownload(record)"
+            >下载</a-button>
+          </template>
+        </template>
+      </a-table>
     </a-modal>
   </div>
 </template>
@@ -311,6 +356,70 @@ async function handleDownload(record) {
     load()
   } else {
     message.error(result.message || '下载被拒绝')
+  }
+}
+
+// --- 版本历史 ---
+const versionsVisible = ref(false)
+const versionsFile = ref(null)
+const versions = ref([])
+const versionsLoading = ref(false)
+const snapshotting = ref(false)
+const snapshotNote = ref('')
+
+const versionColumns = [
+  { title: '版本', key: 'version', dataIndex: 'version', width: 70 },
+  { title: 'SHA-256', key: 'sha256', dataIndex: 'sha256' },
+  { title: '大小', key: 'file_size', dataIndex: 'file_size', width: 90 },
+  { title: '创建人', key: 'created_by', dataIndex: 'created_by', width: 100 },
+  { title: '创建时间', key: 'created_at', dataIndex: 'created_at', width: 170 },
+  { title: '说明', key: 'note', dataIndex: 'note', ellipsis: true },
+  { title: '操作', key: 'action', width: 80 },
+]
+
+async function loadVersions() {
+  versionsLoading.value = true
+  try {
+    const res = await governanceApi.versions(props.dbId, versionsFile.value.file_id)
+    versions.value = res.data?.items || []
+  } catch (e) {
+    message.error(e.message || '加载版本失败')
+  } finally {
+    versionsLoading.value = false
+  }
+}
+
+function handleVersions(record) {
+  versionsFile.value = record
+  versionsVisible.value = true
+  snapshotNote.value = ''
+  loadVersions()
+}
+
+async function handleSnapshot() {
+  snapshotting.value = true
+  try {
+    await governanceApi.snapshot(props.dbId, versionsFile.value.file_id, snapshotNote.value)
+    message.success('版本快照已创建')
+    loadVersions()
+    load()
+  } catch (e) {
+    message.error(e.message || '创建快照失败')
+  } finally {
+    snapshotting.value = false
+  }
+}
+
+async function handleVersionDownload(record) {
+  const result = await downloadAuthenticated(
+    governanceApi.versionDownloadUrl(props.dbId, versionsFile.value.file_id, record.version),
+    versionsFile.value.filename,
+  )
+  if (result.ok) {
+    message.success('版本下载已开始')
+    loadVersions()
+  } else {
+    message.error(result.message || '版本下载被拒绝')
   }
 }
 

@@ -38,6 +38,12 @@ export const governanceApi = {
     `/api/governance/databases/${dbId}/documents/${fileId}/download`,
   exportUrl: (dbId, format = 'xlsx') =>
     `/api/governance/databases/${dbId}/export?format=${format}`,
+  versions: (dbId, fileId) =>
+    apiGet(`/api/governance/databases/${dbId}/documents/${fileId}/versions`, {}, true),
+  snapshot: (dbId, fileId, note) =>
+    apiPost(`/api/governance/databases/${dbId}/documents/${fileId}/versions/snapshot`, { note }, {}, true),
+  versionDownloadUrl: (dbId, fileId, version) =>
+    `/api/governance/databases/${dbId}/documents/${fileId}/versions/${version}/download`,
 }
 
 /**

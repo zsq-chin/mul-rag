@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 import server.models.governance_model  # noqa: F401
 import server.models.kb_models  # noqa: F401
 from server.models import Base
-from server.models.governance_model import KnowledgeGovernance
+from server.models.governance_model import KnowledgeDocumentVersion, KnowledgeGovernance
 from server.models.kb_models import KnowledgeDatabase, KnowledgeFile
 from server.services import governance_service
 from server.services.governance_service import (
@@ -433,6 +433,173 @@ class GovernanceServiceTests(unittest.TestCase):
             with self.assertRaises(GovernanceError, msg=f"id={bad!r}"):
                 governance_service._safe_id(bad)
         self.assertEqual(governance_service._safe_id("kb_abc123"), "kb_abc123")
+
+
+class GovernanceVersionTests(unittest.TestCase):
+    def test_snapshot_creates_version_with_hash_and_size(self):
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    v = governance_service.create_snapshot(
+                        session, "kb_test", "file_a", creator="admin", note="首次快照"
+                    )
+                    self.assertEqual(v["version"], 1)
+                    self.assertEqual(v["note"], "首次快照")
+                    self.assertEqual(v["created_by"], "admin")
+                    self.assertEqual(v["file_size"], len("content a.pdf"))
+                    self.assertEqual(len(v["sha256"]), 64)
+                    # 源文件副本位于受控目录
+                    p = os.path.join(data_root, "knowledge_versions", "kb_test", "file_a", "1", "file")
+                    self.assertTrue(os.path.isfile(p))
+                finally:
+                    _restore_roots()
+
+    def test_versions_monotonic_no_duplicate(self):
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    v1 = governance_service.create_snapshot(session, "kb_test", "file_a")
+                    # 改变内容后再次快照
+                    p = os.path.join(data_root, "a.pdf")
+                    Path(p).write_bytes(b"changed content")
+                    v2 = governance_service.create_snapshot(session, "kb_test", "file_a")
+                    v3 = governance_service.create_snapshot(session, "kb_test", "file_a")
+                    self.assertEqual([v1["version"], v2["version"], v3["version"]], [1, 2, 3])
+                    # 直接预插 version=1 已提交后再建快照 → 不重号
+                    session.add(
+                        KnowledgeDocumentVersion(
+                            db_id="kb_test", file_id="file_b", version=1,
+                            sha256="x", file_size=0, note="pre",
+                        )
+                    )
+                    session.commit()
+                    vb = governance_service.create_snapshot(session, "kb_test", "file_b")
+                    self.assertEqual(vb["version"], 2)
+                finally:
+                    _restore_roots()
+
+    def test_same_content_snapshot_dedups_copy(self):
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    v1 = governance_service.create_snapshot(session, "kb_test", "file_a")
+                    v2 = governance_service.create_snapshot(session, "kb_test", "file_a")
+                    self.assertTrue(v2["deduplicated"], "相同内容不重复复制")
+                    self.assertFalse(v2["sha256"] != v1["sha256"])
+                    # 版本 2 目录不应有副本文件
+                    v2_dir = os.path.join(data_root, "knowledge_versions", "kb_test", "file_a", "2")
+                    self.assertFalse(os.path.exists(os.path.join(v2_dir, "file")))
+                    # v1 目录有副本
+                    self.assertTrue(
+                        os.path.isfile(os.path.join(
+                            data_root, "knowledge_versions", "kb_test", "file_a", "1", "file"))
+                    )
+                finally:
+                    _restore_roots()
+
+    def test_list_versions_orders_and_counts(self):
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    governance_service.create_snapshot(session, "kb_test", "file_a", note="n1")
+                    governance_service.create_snapshot(session, "kb_test", "file_a", note="n2")
+                    data = governance_service.list_versions(session, "kb_test", "file_a")
+                    self.assertEqual(data["total"], 2)
+                    self.assertEqual([v["version"] for v in data["items"]], [2, 1])
+                finally:
+                    _restore_roots()
+
+    def test_version_download_dedup_chain_and_permissions(self):
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    governance_service.create_snapshot(session, "kb_test", "file_a")
+                    v2 = governance_service.create_snapshot(session, "kb_test", "file_a")  # dedup
+                    info = governance_service.resolve_version_download(
+                        session, "kb_test", "file_a", v2["version"], _User("user")
+                    )
+                    self.assertEqual(info["filename"], "a.pdf")
+                    self.assertGreater(info["size_bytes"], 0)
+                    # restricted → 非 superadmin 拒绝
+                    governance_service.update_governance(
+                        session, "kb_test", "file_a", {"confidentiality": "restricted"}
+                    )
+                    with self.assertRaises(GovernanceForbidden):
+                        governance_service.resolve_version_download(
+                            session, "kb_test", "file_a", v2["version"], _User("admin")
+                        )
+                    info = governance_service.resolve_version_download(
+                        session, "kb_test", "file_a", v2["version"], _User("superadmin")
+                    )
+                    self.assertEqual(info["version"], v2["version"])
+                    # download_allowed=0 → 一律拒绝
+                    governance_service.update_governance(
+                        session, "kb_test", "file_a",
+                        {"confidentiality": "internal", "download_allowed": False},
+                    )
+                    with self.assertRaises(GovernanceForbidden):
+                        governance_service.resolve_version_download(
+                            session, "kb_test", "file_a", v2["version"], _User("superadmin")
+                        )
+                finally:
+                    _restore_roots()
+
+    def test_version_not_found_cases(self):
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    with self.assertRaises(GovernanceNotFound):
+                        governance_service.list_versions(session, "kb_test", "file_missing")
+                    governance_service.create_snapshot(session, "kb_test", "file_a")
+                    with self.assertRaises(GovernanceNotFound):
+                        governance_service.resolve_version_download(
+                            session, "kb_test", "file_a", 99, _User("superadmin")
+                        )
+                finally:
+                    _restore_roots()
+
+    def test_snapshot_rejects_path_traversal_source(self):
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    evil = os.path.join(data_root, "..", "outside.txt")
+                    Path(evil).write_bytes(b"secret")
+                    _seed_file(session, data_root, "kb_test", "file_evil", "evil.txt", evil)
+                    with self.assertRaises(GovernanceNotFound):
+                        governance_service.create_snapshot(session, "kb_test", "file_evil")
+                finally:
+                    _restore_roots()
+
+    def test_snapshot_metadata_has_no_path(self):
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    v = governance_service.create_snapshot(session, "kb_test", "file_a")
+                    self.assertNotIn("path", v)
+                    self.assertNotIn("path", v["sha256"])
+                    row = (
+                        session.query(KnowledgeDocumentVersion)
+                        .filter_by(db_id="kb_test", file_id="file_a", version=v["version"])
+                        .first()
+                    )
+                    self.assertNotIn("path", row.metadata_snapshot)
+                finally:
+                    _restore_roots()
 
 
 class GovernanceRouterSourceTests(unittest.TestCase):

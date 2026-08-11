@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from server.db_manager import db_manager
-from server.schemas.governance import GovernanceUpdate
+from server.schemas.governance import GovernanceUpdate, VersionSnapshotCreate
 from server.services import governance_service
 from server.services.audit_service import AuditService
 from server.utils.auth_middleware import get_required_user, get_superadmin_user
@@ -162,6 +162,116 @@ async def download_governance_document(
             "filename": info["filename"],
             "size_bytes": info["size_bytes"],
             "extension": info["extension"],
+        },
+        ip=request.client.host,
+    )
+    return StreamingResponse(
+        _file_chunks(info["abs_path"]),
+        media_type=governance_service.media_type_for(info["extension"]),
+        headers={
+            "Content-Disposition": _attachment_disposition(info["filename"]),
+            "Content-Length": str(info["size_bytes"]),
+        },
+    )
+
+
+@router.get("/databases/{db_id}/documents/{file_id}/versions")
+async def list_document_versions(
+    db_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_required_user),
+):
+    """返回文档版本历史（任何已登录用户可查看）。"""
+    try:
+        data = governance_service.list_versions(db, db_id, file_id)
+    except governance_service.GovernanceError as e:
+        raise _to_http(e)
+    return {"status": "success", "data": data, "message": ""}
+
+
+@router.post("/databases/{db_id}/documents/{file_id}/versions/snapshot")
+async def create_document_version_snapshot(
+    db_id: str,
+    file_id: str,
+    payload: VersionSnapshotCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    superadmin=Depends(get_superadmin_user),
+):
+    """创建源文件版本快照（superadmin）。不重建索引。"""
+    try:
+        data = governance_service.create_snapshot(
+            db,
+            db_id,
+            file_id,
+            creator=superadmin.username or "",
+            note=payload.note,
+        )
+    except governance_service.GovernanceError as e:
+        AuditService.record(
+            "knowledge.version.snapshot",
+            user_id=superadmin.id,
+            resource_type="document",
+            resource_id=file_id,
+            status="failed",
+            detail={"db_id": db_id, "file_id": file_id},
+            ip=request.client.host,
+        )
+        raise _to_http(e)
+    AuditService.record(
+        "knowledge.version.snapshot",
+        user_id=superadmin.id,
+        resource_type="document",
+        resource_id=file_id,
+        status="success",
+        detail={
+            "db_id": db_id,
+            "file_id": file_id,
+            "version": data.get("version"),
+            "size_bytes": data.get("file_size"),
+        },
+        ip=request.client.host,
+    )
+    return {"status": "success", "data": data, "message": "版本快照已创建"}
+
+
+@router.get("/databases/{db_id}/documents/{file_id}/versions/{version}/download")
+async def download_document_version(
+    db_id: str,
+    file_id: str,
+    version: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(get_required_user),
+):
+    """版本受控下载：权限同文档下载，只从受控版本目录读取。"""
+    try:
+        info = governance_service.resolve_version_download(db, db_id, file_id, version, user)
+    except governance_service.GovernanceError as e:
+        AuditService.record(
+            "knowledge.download",
+            user_id=getattr(user, "id", None),
+            resource_type="document_version",
+            resource_id=f"{file_id}:v{version}",
+            status="failed",
+            detail={"db_id": db_id, "file_id": file_id, "version": version, "reason": str(e)},
+            ip=request.client.host,
+        )
+        raise _to_http(e)
+    AuditService.record(
+        "knowledge.download",
+        user_id=user.id,
+        resource_type="document_version",
+        resource_id=f"{file_id}:v{version}",
+        status="success",
+        detail={
+            "db_id": info["db_id"],
+            "file_id": info["file_id"],
+            "filename": info["filename"],
+            "size_bytes": info["size_bytes"],
+            "extension": info["extension"],
+            "version": info["version"],
         },
         ip=request.client.host,
     )

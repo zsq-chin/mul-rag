@@ -18,3 +18,9 @@ class GovernanceUpdate(BaseModel):
     download_allowed: Optional[bool] = None  # 是否允许下载
     owner_department: Optional[str] = Field(default=None, max_length=100, description="责任部门")
     source_updated_at: Optional[datetime] = None  # 来源更新时间
+
+
+class VersionSnapshotCreate(BaseModel):
+    """创建版本快照请求。"""
+
+    note: Optional[str] = Field(default=None, max_length=255, description="版本说明")
