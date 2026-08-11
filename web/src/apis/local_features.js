@@ -81,6 +81,21 @@ export const evaluationApi = {
     `/api/evaluation/suites/${suiteId}/export?format=${format}`,
 }
 
+/** 系统配置历史与安全回滚（仅 superadmin） */
+export const configHistoryApi = {
+  history: (params) => {
+    const qs = new URLSearchParams(
+      Object.fromEntries(
+        Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''),
+      ),
+    ).toString()
+    return apiGet(`/api/config/history?${qs}`, {}, true)
+  },
+  change: (changeId) => apiGet(`/api/config/history/${changeId}`, {}, true),
+  rollback: (changeId, description) =>
+    apiPost(`/api/config/history/${changeId}/rollback`, { description }, {}, true),
+}
+
 /** 统一操作审计（仅 superadmin） */
 export const auditApi = {
   events: (params) => {

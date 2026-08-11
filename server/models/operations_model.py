@@ -7,15 +7,21 @@ from server.models import Base
 
 
 class ConfigChangeHistory(Base):
-    """系统配置修改历史（修改前/后快照、操作人、说明）。"""
+    """系统配置修改历史（修改前/后快照、操作人、说明）。
+
+    每次修改/回滚写入一条记录：
+    - changes：JSON 数组 [{key, old, new}]，值已脱敏（custom_models 的 api_key 为 "***"）。
+    - before_snapshot / after_snapshot：脱敏并剔除内部大结构后的全量配置快照（JSON）。
+    回滚只回滚该次变更涉及的非秘密字段，并写入新的历史记录，不删除旧记录。
+    """
     __tablename__ = "config_change_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    config_key = Column(String(255), nullable=False, index=True)
-    before_value = Column(Text, nullable=True)
-    after_value = Column(Text, nullable=True)
-    operator = Column(String(100), nullable=True)
-    note = Column(String(255), nullable=True)
+    operator = Column(String(100), nullable=False, index=True)
+    description = Column(String(500), nullable=True)
+    changes = Column(Text, nullable=True)
+    before_snapshot = Column(Text, nullable=True)
+    after_snapshot = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now())
 
 
