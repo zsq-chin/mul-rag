@@ -96,6 +96,20 @@ export const configHistoryApi = {
     apiPost(`/api/config/history/${changeId}/rollback`, { description }, {}, true),
 }
 
+/** 本机备份/校验/预检/恢复（仅 superadmin） */
+export const backupApi = {
+  create: (payload) => apiPost('/api/operations/backups', payload, {}, true),
+  list: (page = 1, pageSize = 20) =>
+    apiGet(`/api/operations/backups?page=${page}&page_size=${pageSize}`, {}, true),
+  get: (backupId) => apiGet(`/api/operations/backups/${backupId}`, {}, true),
+  downloadUrl: (backupId) => `/api/operations/backups/${backupId}/download`,
+  verify: (backupId) => apiPost(`/api/operations/backups/${backupId}/verify`, {}, {}, true),
+  preview: (backupId) => apiPost(`/api/operations/backups/${backupId}/restore/preview`, {}, {}, true),
+  restore: (backupId, token) =>
+    apiPost(`/api/operations/backups/${backupId}/restore`, { token }, {}, true),
+  remove: (backupId) => apiDelete(`/api/operations/backups/${backupId}`, {}, true),
+}
+
 /** 统一操作审计（仅 superadmin） */
 export const auditApi = {
   events: (params) => {
