@@ -26,12 +26,53 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Minimal stub modules (mirrors test_graph_retrieval.py)
 # ---------------------------------------------------------------------------
 
+_ABSENT = object()
+_saved_modules = {}
+_stub_names = []
+_modules_snapshot: set = set()
+
+
 def _make_module(name, **attrs):
+    """Create a stub module and register it under ``name`` in sys.modules.
+
+    P2-2: prior state is saved so the module-level loader can restore the
+    global table afterwards (see ``_restore_modules``). Without this, the
+    plain ``server`` / ``server.utils`` stubs leak into later test modules and
+    break their namespace imports ("server is not a package") in discover
+    order -- a class of order-dependent error the review forbids.
+    """
+    if name not in _stub_names:
+        _stub_names.append(name)
+    if name not in _saved_modules:
+        _saved_modules[name] = sys.modules.get(name, _ABSENT)
     mod = types.ModuleType(name)
     for k, v in attrs.items():
         setattr(mod, k, v)
     sys.modules[name] = mod
     return mod
+
+
+def _restore_modules():
+    """Remove only the src.*/server.* entries this module created.
+
+    ``_modules_snapshot`` holds the sys.modules keys as they were when
+    setUpModule began. Any src/server entry absent from that snapshot was
+    created by this module's stubbing or by loading the real retriever /
+    graph_retrieval modules, so it is safe to drop. Entries that already
+    existed (e.g. real modules other test files imported during collection,
+    like ``server.services.model_credentials``) are left untouched -- an
+    aggressive "delete every server.* not in _saved_modules" sweep would
+    clobber them and break later tests (order-dependent failure).
+    """
+    for name in list(sys.modules):
+        if name not in _modules_snapshot and name.startswith(("src", "server")):
+            del sys.modules[name]
+    for name in _stub_names:
+        prev = _saved_modules.get(name, _ABSENT)
+        if prev is _ABSENT:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = prev
 
 
 class _StubConfig(dict):
@@ -47,63 +88,99 @@ class _StubConfig(dict):
             raise AttributeError(key)
 
 
-_logger = MagicMock()
-_make_module("src.utils.logging_config", logger=_logger)
-_make_module("src.utils", logger=_logger)
-_make_module("src.models.rerank_model", get_reranker=MagicMock())
-_make_module("src.core.operators", HyDEOperator=MagicMock())
-_mm_remote = _make_module(
-    "server.utils.multimodal_remote",
-    format_multimodal_context=MagicMock(return_value=""),
-    search_multimodal_remote=MagicMock(return_value={"results": [], "message": ""}),
-)
+def setUpModule():
+    """Install stubbed ``src``/``server`` packages, then load the real
+    ``graph_retrieval.py`` and ``retriever.py`` against them.
 
-# Stubbed prompts: only the multi-round templates we lazy-import are needed.
-_make_module(
-    "src.utils.prompts",
-    multi_query_generation_prompt="GEN question={question} history={history} count={count}",
-    multi_query_assessment_prompt="ASSESS question={question} results={results}",
-    multi_query_refine_prompt="REFINE question={question} results={results} assessment={assessment} previous={previous} count={count}",
-)
+    P2-2: the stubs live only for the duration of this module's tests
+    (``tearDownModule`` restores the global module table). The review forbids
+    permanently faking public package names at import phase -- the plain
+    ``server`` / ``server.utils`` stubs previously leaked into later test
+    modules and broke their namespace imports in discover order.
+    """
+    global _logger, _mm_remote, _cfg, _kb, _src_core, _src_models
+    global _helpers_mod, _retriever_mod, Retriever
 
-_config_mod = _make_module("src.config", Config=_StubConfig)
-_cfg = _config_mod.Config()
-_cfg.update({
-    "enable_web_search": False,
-    "enable_reranker": False,
-    "enable_knowledge_base": True,
-    "enable_knowledge_graph": False,
-    "use_rewrite_query": "off",
-    "model_provider": "test",
-    "model_name": "test-model",
-    "multi_query_max_rounds": 2,
-    "multi_query_count": 3,
-    "multi_query_recall_min": 3,
-})
+    _saved_modules.clear()
+    _stub_names.clear()
+    _modules_snapshot.clear()
+    _modules_snapshot.update(sys.modules)
 
-_kb = MagicMock()
-_src_core = _make_module("src.core")
-_src_core.__path__ = [str(_PROJECT_ROOT / "src" / "core")]
-_src_models = _make_module("src.models", select_model=MagicMock())
-_make_module("src", config=_cfg, knowledge_base=_kb, graph_base=MagicMock())
-_make_module("server", )
-_make_module("server.utils")
+    _logger = MagicMock()
+    _make_module("src.utils.logging_config", logger=_logger)
+    _make_module("src.utils", logger=_logger)
+    _make_module("src.models.rerank_model", get_reranker=MagicMock())
+    _make_module("src.core.operators", HyDEOperator=MagicMock())
+    _mm_remote = _make_module(
+        "server.utils.multimodal_remote",
+        format_multimodal_context=MagicMock(return_value=""),
+        search_multimodal_remote=MagicMock(return_value={"results": [], "message": ""}),
+    )
 
-# Load the real graph_retrieval helpers (pure, no side effects).
-_helpers_path = _PROJECT_ROOT / "src" / "core" / "graph_retrieval.py"
-_spec_helpers = importlib.util.spec_from_file_location("src.core.graph_retrieval", _helpers_path)
-_helpers_mod = importlib.util.module_from_spec(_spec_helpers)
-sys.modules["src.core.graph_retrieval"] = _helpers_mod
-_spec_helpers.loader.exec_module(_helpers_mod)
+    # Stubbed prompts: only the multi-round templates we lazy-import are needed.
+    _make_module(
+        "src.utils.prompts",
+        multi_query_generation_prompt="GEN question={question} history={history} count={count}",
+        multi_query_assessment_prompt="ASSESS question={question} results={results}",
+        multi_query_refine_prompt="REFINE question={question} results={results} assessment={assessment} previous={previous} count={count}",
+        knowbase_qa_template="CONTEXT:\n{external}\nQUERY:{query}",
+        build_qa_prompt=lambda query, external, params=None, is_item_request=False: external,
+        RETRIEVAL_META_KEYS=("db_id", "use_graph", "use_web", "use_multimodal_kb"),
+        retrieval_mode_enabled=lambda meta: (
+            isinstance(meta, dict)
+            and any(meta.get(k) for k in ("db_id", "use_graph", "use_web", "use_multimodal_kb"))
+        ),
+        build_chat_prompt=lambda query, external, meta, params=None: external,
+    )
 
-# Load the real retriever module against the stubs.
-_retriever_path = _PROJECT_ROOT / "src" / "core" / "retriever.py"
-_spec = importlib.util.spec_from_file_location("src.core.retriever", _retriever_path)
-_retriever_mod = importlib.util.module_from_spec(_spec)
-sys.modules["src.core.retriever"] = _retriever_mod
-_spec.loader.exec_module(_retriever_mod)
+    _config_mod = _make_module("src.config", Config=_StubConfig)
+    _cfg = _config_mod.Config()
+    _cfg.update({
+        "enable_web_search": False,
+        "enable_reranker": False,
+        "enable_knowledge_base": True,
+        "enable_knowledge_graph": False,
+        "use_rewrite_query": "off",
+        "model_provider": "test",
+        "model_name": "test-model",
+        "multi_query_max_rounds": 2,
+        "multi_query_count": 3,
+        "multi_query_recall_min": 3,
+    })
 
-Retriever = _retriever_mod.Retriever
+    _kb = MagicMock()
+    _src_core = _make_module("src.core")
+    _src_core.__path__ = [str(_PROJECT_ROOT / "src" / "core")]
+    _src_models = _make_module("src.models", select_model=MagicMock())
+    _make_module("src", config=_cfg, knowledge_base=_kb, graph_base=MagicMock())
+    _make_module("server", )
+    _make_module("server.utils")
+
+    # Load the real graph_retrieval helpers (pure, no side effects).
+    _helpers_path = _PROJECT_ROOT / "src" / "core" / "graph_retrieval.py"
+    _spec_helpers = importlib.util.spec_from_file_location("src.core.graph_retrieval", _helpers_path)
+    _helpers_mod = importlib.util.module_from_spec(_spec_helpers)
+    for _n in ("src.core.graph_retrieval", "src.core.retriever"):
+        if _n not in _stub_names:
+            _stub_names.append(_n)
+        _saved_modules.setdefault(_n, sys.modules.get(_n, _ABSENT))
+    sys.modules["src.core.graph_retrieval"] = _helpers_mod
+    _spec_helpers.loader.exec_module(_helpers_mod)
+
+    # Load the real retriever module against the stubs.
+    _retriever_path = _PROJECT_ROOT / "src" / "core" / "retriever.py"
+    _spec = importlib.util.spec_from_file_location("src.core.retriever", _retriever_path)
+    _retriever_mod = importlib.util.module_from_spec(_spec)
+    sys.modules["src.core.retriever"] = _retriever_mod
+    _spec.loader.exec_module(_retriever_mod)
+
+    Retriever = _retriever_mod.Retriever
+
+
+def tearDownModule():
+    """Remove every stub this module installed so later test modules in the
+    same process see the real packages (or their absence)."""
+    _restore_modules()
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +392,7 @@ class FinalRerankTests(unittest.TestCase):
 
                 return _FakeReranker()
 
-            with patch("src.core.retriever.get_reranker", side_effect=_fake_get_reranker):
+            with patch.object(_retriever_mod, "get_reranker", side_effect=_fake_get_reranker):
                 results = [
                     {"id": 1, "distance": 0.9, "entity": {"text": "t1"}, "file": {}},
                     {"id": 2, "distance": 0.5, "entity": {}, "file": {}},  # 无 text
