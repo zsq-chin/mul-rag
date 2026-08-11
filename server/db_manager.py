@@ -11,6 +11,15 @@ from server.models.thread_model import Thread
 from server.models.kb_models import KnowledgeDatabase, KnowledgeFile, KnowledgeNode
 from server.models.statistics_model import Question, Discussion, HelpRequest
 from server.models.user_model_credential import UserModelCredential
+from server.models.feedback_model import AnswerFeedback
+from server.models.governance_model import KnowledgeGovernance, KnowledgeDocumentVersion
+from server.models.evaluation_model import EvaluationSuite, EvaluationCase
+from server.models.operations_model import (
+    ConfigChangeHistory,
+    BackupJob,
+    AlertRule,
+    AlertEvent,
+)
 from src.utils import logger
 
 class DBManager:
