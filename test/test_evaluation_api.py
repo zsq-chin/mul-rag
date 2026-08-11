@@ -132,6 +132,40 @@ class EvaluationSuiteTests(unittest.TestCase):
             with self.assertRaises(CaseNotFound):
                 evaluation_service.delete_case(session, suite2["id"], case_id)
 
+    def test_case_null_clears_optional_fields(self):
+        """P2-2 验收：显式 null 清空答案/要点/备注/分类，重新加载后旧值不保留。"""
+        with _temp_db() as (engine, session):
+            suite = _make_suite(session)
+            case = _make_case(session, suite["id"])
+            # 明确清空（等价于 PATCH 发送 null）
+            evaluation_service.update_case(
+                session,
+                suite["id"],
+                case["id"],
+                {"answer": None, "key_points": None, "note": None, "category": None},
+            )
+            reloaded = evaluation_service.list_cases(session, suite["id"])["items"][0]
+            self.assertIsNone(reloaded["answer"])
+            self.assertEqual(reloaded["key_points"], [])
+            self.assertIsNone(reloaded["note"])
+            self.assertIsNone(reloaded["category"])
+            # 未提交的字段不受影响
+            self.assertEqual(reloaded["question"], "如何防止原油泄漏？")
+            self.assertEqual(reloaded["difficulty"], "medium")
+            self.assertEqual(reloaded["kb_id"], "kb_test")
+
+    def test_suite_null_clears_description_and_category(self):
+        """P2-2 验收：suite 描述/分类可被 null 清空并重新加载。"""
+        with _temp_db() as (engine, session):
+            suite = _make_suite(session, "安全测试")
+            evaluation_service.update_suite(
+                session, suite["id"], {"description": None, "category": None}
+            )
+            reloaded = evaluation_service.list_suites(session)["items"][0]
+            self.assertIsNone(reloaded["description"])
+            self.assertIsNone(reloaded["category"])
+            self.assertEqual(reloaded["name"], "安全测试")
+
     def test_case_validation(self):
         with _temp_db() as (engine, session):
             suite = _make_suite(session)
@@ -321,6 +355,10 @@ class EvaluationRouterSourceTests(unittest.TestCase):
     def test_export_supports_json_and_csv(self):
         self.assertIn('format: str = Query("json", pattern="^(json|csv)$")', self.src)
         self.assertIn("export_cases_csv", self.src)
+
+    def test_patch_uses_exclude_unset_to_allow_clearing(self):
+        """P2-2：两个 PATCH 处理器（suite/case）必须用 exclude_unset 区分清空。"""
+        self.assertEqual(self.src.count("model_dump(exclude_unset=True)"), 2)
 
     def test_no_remote_multimodal_access(self):
         self.assertNotIn("multimodal", self.src.lower())

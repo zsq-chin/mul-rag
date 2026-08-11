@@ -48,7 +48,13 @@ KNOWN_ACTIONS = [
     "config.rollback",
     "backup.create",
     "backup.restore",
+    "backup.verify",
+    "backup.delete",
+    "backup.download",
+    "alert.rule.create",
     "alert.rule.update",
+    "alert.rule.delete",
+    "alert.event.acknowledge",
     "alert.email.test",
 ]
 # 说明：使用标准 logging 而非 src.utils.logging_config.logger，

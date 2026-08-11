@@ -143,7 +143,9 @@ class AuditReadTests(unittest.TestCase):
             "knowledge.download", "knowledge.export", "feedback.upsert",
             "feedback.delete", "evaluation.import", "config.update",
             "config.rollback", "backup.create", "backup.restore",
-            "alert.rule.update", "alert.email.test",
+            "backup.verify", "backup.delete", "backup.download",
+            "alert.rule.create", "alert.rule.update", "alert.rule.delete",
+            "alert.event.acknowledge", "alert.email.test",
         }
         self.assertTrue(required.issubset(actions))
         self.assertEqual(len(actions), len(KNOWN_ACTIONS))

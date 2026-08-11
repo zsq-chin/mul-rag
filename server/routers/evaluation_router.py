@@ -103,7 +103,8 @@ async def update_evaluation_suite(
     superadmin=Depends(get_superadmin_user),
 ):
     try:
-        data = evaluation_service.update_suite(db, suite_id, payload.model_dump(exclude_none=True))
+        # exclude_unset 区分“未提交”与“明确清空（null）”，允许清空描述/分类
+        data = evaluation_service.update_suite(db, suite_id, payload.model_dump(exclude_unset=True))
     except evaluation_service.EvaluationError as e:
         _audit("evaluation.suite.update", superadmin, suite_id, "failed",
                {"suite_id": suite_id}, request.client.host)
@@ -177,7 +178,8 @@ async def update_evaluation_case(
     superadmin=Depends(get_superadmin_user),
 ):
     try:
-        data = evaluation_service.update_case(db, suite_id, case_id, payload.model_dump(exclude_none=True))
+        # exclude_unset 区分“未提交”与“明确清空（null）”，允许清空答案/要点/备注等
+        data = evaluation_service.update_case(db, suite_id, case_id, payload.model_dump(exclude_unset=True))
     except evaluation_service.EvaluationError as e:
         _audit("evaluation.case.update", superadmin, suite_id, "failed",
                {"suite_id": suite_id, "case_id": case_id}, request.client.host)

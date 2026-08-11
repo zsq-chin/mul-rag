@@ -13,7 +13,9 @@ ENV http_proxy=$http_proxy \
 COPY ./web/package*.json ./
 
 # 安装依赖
-RUN npm install -g pnpm@latest-10
+# 版本与 web/package.json 的 packageManager 字段一致，避免运行时 corepack/pnpm
+# 再联网下载匹配版本（否则会命中无效代理导致 ERR_PNPM_META_FETCH_FAIL）
+RUN npm install -g pnpm@10.11.0
 # RUN pnpm install
 # RUN npm install --registry http://mirrors.cloud.tencent.com/npm/ --verbose --force
 RUN npm install --registry https://registry.npmmirror.com --verbose --force

@@ -227,7 +227,7 @@ class StatisticsOverviewFeedbackTests(unittest.TestCase):
     """/api/statistics/overview 的 feedback 区域（源码级验证，避免引入 Milvus）。"""
 
     def setUp(self):
-        self.source = Path(__file__).resolve().parents[1] / "server" / "routers" / "statistics_router.py"
+        self.source = Path(__file__).resolve().parents[1] / "server" / "services" / "statistics_service.py"
         self.src = self.source.read_text(encoding="utf-8")
 
     def test_overview_has_feedback_region(self):

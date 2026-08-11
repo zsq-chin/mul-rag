@@ -40,24 +40,27 @@ def _ctx():
 
 
 @router.get("/health")
-async def operations_health(
+def operations_health(
     db: Session = Depends(get_db),
     superadmin=Depends(get_superadmin_user),
 ):
+    # 同步 def：探测交给 FastAPI 线程池，不阻塞事件循环
     return {"status": "success", "data": monitoring_service.health(db, _ctx()), "message": ""}
 
 
 @router.get("/metrics")
-async def operations_metrics(
+def operations_metrics(
     db: Session = Depends(get_db),
     superadmin=Depends(get_superadmin_user),
 ):
+    # 同步 def：nvidia-smi 等阻塞探测在 FastAPI 线程池执行，不阻塞事件循环
     return {"status": "success", "data": monitoring_service.metrics(db, _ctx()), "message": ""}
 
 
 @router.get("/dependencies")
-async def operations_dependencies(
+def operations_dependencies(
     db: Session = Depends(get_db),
     superadmin=Depends(get_superadmin_user),
 ):
+    # 同步 def：Milvus/Neo4j/GPU 探测在 FastAPI 线程池执行，不阻塞事件循环
     return {"status": "success", "data": monitoring_service.dependencies(db, _ctx()), "message": ""}

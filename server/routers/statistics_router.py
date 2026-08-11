@@ -1,7 +1,5 @@
 # server/routers/statistics_router.py
 
-import json
-from collections import Counter
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,16 +8,12 @@ from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from server.db_manager import db_manager
-from server.models.chat_model import ChatRecord
 from server.models.statistics_model import Discussion, HelpRequest, Question
-from server.models.thread_model import Thread
 from server.models.user_model import User
-from server.services import feedback_service
+from server.services import statistics_service
 from server.services.statistics_aggregation import (
     MOCK_SEED_TITLES,
     aggregate_records,
-    build_daily_trend,
-    top_users,
 )
 from server.utils.auth_middleware import get_superadmin_user
 from src.utils.logging_config import logger
@@ -48,19 +42,9 @@ class HelpRequestCreate(BaseModel):
     email: str
 
 
-# --- 辅助函数：读取原始对话记录 ---
-def _chat_record_rows(db: Session) -> list[dict]:
-    """把 chat_records 表转成聚合函数需要的 dict 列表（按保存时间倒序）。"""
-    records = db.query(ChatRecord).order_by(ChatRecord.updatetime.desc()).all()
-    return [
-        {"content": r.content, "updatetime": r.updatetime, "user_id": r.user_id}
-        for r in records
-    ]
-
-
 # --- API Endpoints ---
 
-# 1. 统计数据总览（真实数据聚合）
+# 1. 统计数据总览（真实数据聚合，聚合逻辑在 statistics_service）
 @router.get("/overview")
 def get_statistics_overview(
     days: int = 14,
@@ -68,53 +52,9 @@ def get_statistics_overview(
     current_user: User = Depends(get_superadmin_user),
 ):
     """基于 chat_records / thread 的真实问答数据，返回统计面板所需的全部数据。"""
-    rows = _chat_record_rows(db)
-    agg = aggregate_records(rows)
-
-    threads = db.query(Thread).filter(Thread.status == 1).all()
-    agent_counter = Counter((t.agent_id or "未知智能体") for t in threads)
-
-    users = db.query(User).all()
-    users_by_id = {u.id: u for u in users}
-
-    # 最近动态：最近保存的对话
-    recent_activity = []
-    for r in rows[:10]:
-        user = users_by_id.get(r.user_id)
-        title = ""
-        try:
-            conv = json.loads(r["content"]) if r["content"] else {}
-            if isinstance(conv, dict):
-                title = conv.get("title", "") or ""
-        except (ValueError, TypeError):
-            title = ""
-        recent_activity.append(
-            {
-                "time": r["updatetime"].strftime("%Y-%m-%d %H:%M") if r["updatetime"] else "",
-                "username": user.username if user and user.username else f"用户{r['user_id']}",
-                "title": title,
-            }
-        )
-
-    totals = agg["totals"]
-    totals["threads"] = len(threads)
-    totals["active_users"] = len({r["user_id"] for r in rows})
-
     return {
         "status": "success",
-        "data": {
-            "totals": totals,
-            "daily_trend": build_daily_trend(agg, days=days),
-            "agent_distribution": [
-                {"name": name, "value": count}
-                for name, count in agent_counter.most_common()
-            ],
-            "hot_questions": agg["hot_questions"],
-            "top_users": top_users(agg, users_by_id),
-            "recent_activity": recent_activity,
-            # 反馈指标：严格来自 answer_feedback 真实表；删除反馈后统计同步变化
-            "feedback": feedback_service.summarize(db),
-        },
+        "data": statistics_service.build_overview(db, days=days),
     }
 
 
@@ -125,7 +65,7 @@ def sync_questions(
     current_user: User = Depends(get_superadmin_user),
 ):
     """聚合真实对话里的高频问题，按标题 upsert 到 questions 表；并清理早期演示数据。"""
-    rows = _chat_record_rows(db)
+    rows = statistics_service.chat_record_rows(db)
     agg = aggregate_records(rows)
     counter = agg["hot_counter"]
 

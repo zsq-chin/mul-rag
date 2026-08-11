@@ -104,6 +104,18 @@ services:
       - TIANSHU_API_BASE=${TIANSHU_API_BASE:-http://tianshu-backend:8000/api/v1}
       - TIANSHU_CONNECT_TIMEOUT=${TIANSHU_CONNECT_TIMEOUT:-10}
       - TIANSHU_READ_TIMEOUT=${TIANSHU_READ_TIMEOUT:-60}
+      # 本机邮件告警（仅环境变量注入，绝不落库/出现在 API 响应）
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      - ALERT_CHECK_INTERVAL_SECONDS=${ALERT_CHECK_INTERVAL_SECONDS:-60}
+      - ALERT_EVALUATE_TIMEOUT_SECONDS=${ALERT_EVALUATE_TIMEOUT_SECONDS:-90}
+      # 本机文档上传
+      - UPLOAD_ALLOWED_EXTENSIONS=${UPLOAD_ALLOWED_EXTENSIONS:-}
+      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-100}
     depends_on:
       mysql:
         condition: service_healthy
@@ -132,11 +144,13 @@ services:
     environment:
       - NODE_ENV=development
       - VITE_API_URL=http://api:5050
-      - http_proxy=${http_proxy:-}
-      - https_proxy=${https_proxy:-}
-      - HTTP_PROXY=${HTTP_PROXY:-}
-      - HTTPS_PROXY=${HTTPS_PROXY:-}
-      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1,api,graph,milvus,mysql,.local}
+      # 禁止 pnpm 按 package.json 的 packageManager 字段自我下载匹配版本，
+      # 避免每次启动都联网装 pnpm（镜像里已固定 10.11.0）
+      - npm_config_manage_package_manager_versions=false
+      # 不要透传宿主机回环代理：容器内 127.0.0.1 指向容器自身（无效），
+      # 会导致 pnpm 拉包报 ERR_PNPM_META_FETCH_FAIL。运行时依赖已随镜像安装，
+      # vite 开发服务器无需联网；如需真实代理，请显式写成可被容器访问的
+      # 宿主网关地址（host.docker.internal 对应端口），不要用回环地址。
     command: pnpm run server
     restart: unless-stopped
 

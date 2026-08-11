@@ -284,6 +284,15 @@ class MonitoringRouterSourceTests(unittest.TestCase):
         for route in ('@router.get("/health")', '@router.get("/metrics")', '@router.get("/dependencies")'):
             self.assertIn(route, self.router)
 
+    def test_endpoints_are_sync_def_not_async(self):
+        """P1-7：阻塞探测必须交给 FastAPI 线程池，事件循环不被占用。"""
+        self.assertIn("def operations_health(", self.router)
+        self.assertIn("def operations_metrics(", self.router)
+        self.assertIn("def operations_dependencies(", self.router)
+        self.assertNotIn("async def operations_health", self.router)
+        self.assertNotIn("async def operations_metrics", self.router)
+        self.assertNotIn("async def operations_dependencies", self.router)
+
     def test_prefix_and_superadmin(self):
         self.assertIn('router = APIRouter(prefix="/operations"', self.router)
         self.assertIn("get_superadmin_user", self.router)
