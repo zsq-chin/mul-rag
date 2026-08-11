@@ -42,6 +42,13 @@ AUDIT_DETAIL_WHITELIST = frozenset({
     "reason",
     "count",
     "rating",
+    "confidentiality",
+    "domain",
+    "knowledge_type",
+    "owner_department",
+    "download_allowed",
+    "version",
+    "format",
 })
 
 # 命中即丢弃的密钥提示词（黑名单，双重保险）

@@ -362,7 +362,14 @@
           </div>
         </div>
       </a-tab-pane>
-      
+
+      <a-tab-pane key="governance" v-if="userStore.isSuperAdmin">
+        <template #tab><span><SafetyCertificateOutlined />知识治理</span></template>
+        <div class="db-tab-container">
+          <KnowledgeGovernancePanel :db-id="databaseId" />
+        </div>
+      </a-tab-pane>
+
     </a-tabs>
   </div>
 </div>
@@ -376,6 +383,7 @@ import { useConfigStore } from '@/stores/config'
 import { useUserStore } from '@/stores/user'
 import { knowledgeBaseApi } from '@/apis/admin_api'
 import HeaderComponent from '@/components/HeaderComponent.vue';
+import KnowledgeGovernancePanel from '@/components/KnowledgeGovernancePanel.vue';
 import {
   ReadOutlined,
   LeftOutlined,
@@ -394,7 +402,8 @@ import {
   HddOutlined,
   UpOutlined,
   DownOutlined,
-  FileAddOutlined
+  FileAddOutlined,
+  SafetyCertificateOutlined
 } from '@ant-design/icons-vue'
 import { h } from 'vue';
 
@@ -412,6 +421,7 @@ const queryText = ref('');
 const queryResult = ref(null)
 const filteredResults = ref([])
 const configStore = useConfigStore()
+const userStore = useUserStore()
 
 const state = reactive({
   databaseLoading: false,
