@@ -37,7 +37,8 @@ def _backup_dir():
 
 
 def _kb_root():
-    return os.path.join(config.save_dir, "knowledge")
+    # 普通知识库的真实工作目录是 saves/data（src/core/knowledgebase.py work_dir）
+    return os.path.join(config.save_dir, "data")
 
 
 def _restore_targets():
@@ -69,11 +70,19 @@ async def create_backup(
             log_path=LOG_FILE if include_logs else None,
             include_logs=include_logs,
             include_kb=include_kb,
-            kb_roots=[_kb_root()] if include_kb else (),
+            kb_root=_kb_root() if include_kb else None,
             created_by=superadmin.username,
             note=note,
         )
     except backup_service.BackupError as e:
+        audit_service.record(
+            "backup.create",
+            user_id=superadmin.id,
+            resource_type="backup",
+            status="failed",
+            detail={"reason": str(e)[:200], "include_kb": include_kb},
+            ip=_client_ip(request),
+        )
         raise HTTPException(status_code=e.status_code, detail=str(e))
     audit_service.record(
         "backup.create",
@@ -111,13 +120,31 @@ async def get_backup(
 @router.get("/backups/{backup_id}/download")
 async def download_backup(
     backup_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     superadmin=Depends(get_superadmin_user),
 ):
     try:
         row, path = backup_service._resolve_zip_path(db, backup_id, _backup_dir())
     except backup_service.BackupError as e:
+        audit_service.record(
+            "backup.download",
+            user_id=superadmin.id,
+            resource_type="backup",
+            resource_id=backup_id,
+            status="failed",
+            detail={"backup_id": backup_id, "reason": str(e)[:200]},
+            ip=_client_ip(request),
+        )
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    audit_service.record(
+        "backup.download",
+        user_id=superadmin.id,
+        resource_type="backup",
+        resource_id=backup_id,
+        detail={"backup_id": backup_id, "filename": row.filename, "size_bytes": row.size_bytes},
+        ip=_client_ip(request),
+    )
     return FileResponse(path, filename=row.filename, media_type="application/zip")
 
 
@@ -131,7 +158,24 @@ async def verify_backup(
     try:
         data = backup_service.verify_backup(db, backup_id, _backup_dir())
     except backup_service.BackupError as e:
+        audit_service.record(
+            "backup.verify",
+            user_id=superadmin.id,
+            resource_type="backup",
+            resource_id=backup_id,
+            status="failed",
+            detail={"backup_id": backup_id, "reason": str(e)[:200]},
+            ip=_client_ip(request),
+        )
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    audit_service.record(
+        "backup.verify",
+        user_id=superadmin.id,
+        resource_type="backup",
+        resource_id=backup_id,
+        detail={"backup_id": backup_id, "size_bytes": data.get("size_bytes")},
+        ip=_client_ip(request),
+    )
     return {"status": "success", "data": data, "message": ""}
 
 
@@ -173,7 +217,7 @@ async def restore_backup(
             kb_target_root=_kb_root(),
             config_snapshot=snapshot,
             log_path=LOG_FILE,
-            kb_roots=[_kb_root()],
+            kb_root=_kb_root(),
             created_by=superadmin.username,
         )
     except backup_service.BackupError as e:
@@ -201,11 +245,29 @@ async def restore_backup(
 @router.delete("/backups/{backup_id}")
 async def delete_backup(
     backup_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     superadmin=Depends(get_superadmin_user),
 ):
     try:
         data = backup_service.delete_backup(db, backup_id, _backup_dir())
     except backup_service.BackupError as e:
+        audit_service.record(
+            "backup.delete",
+            user_id=superadmin.id,
+            resource_type="backup",
+            resource_id=backup_id,
+            status="failed",
+            detail={"backup_id": backup_id, "reason": str(e)[:200]},
+            ip=_client_ip(request),
+        )
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    audit_service.record(
+        "backup.delete",
+        user_id=superadmin.id,
+        resource_type="backup",
+        resource_id=backup_id,
+        detail={"backup_id": backup_id, "deleted": True},
+        ip=_client_ip(request),
+    )
     return {"status": "success", "data": data, "message": ""}

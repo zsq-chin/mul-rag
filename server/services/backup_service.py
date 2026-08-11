@@ -26,6 +26,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from server.models.kb_models import KnowledgeFile
 from server.models.operations_model import BackupJob
 from server.services.config_service import sanitize_config_snapshot
 
@@ -88,21 +89,53 @@ def _safe_extract(zipf, dest_dir):
     return names
 
 
-def _collect_kb_files(kb_roots):
-    """白名单根目录内收集知识源文件；跳过敏感文件。"""
+def _validate_kb_source(raw, root_abs):
+    """校验单条 KnowledgeFile.path：拒绝 URL / 软链接 / 越界；缺失文件返回 None。"""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    s = raw.strip()
+    # 拒绝 URL（任意 scheme:// 或以 // 开头）
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", s) or s.startswith("//"):
+        raise BackupError(f"知识源文件路径非法（URL）：{s[:80]}", 400)
+    p = Path(s)
+    check = p if p.is_absolute() else Path(root_abs) / p
+    if os.path.islink(check):
+        raise BackupError(f"知识源文件为软链接，已拒绝：{s[:80]}", 400)
+    real = os.path.realpath(check)
+    if real != root_abs and not real.startswith(root_abs + os.sep):
+        raise BackupError(f"知识源文件路径越界：{s[:80]}", 400)
+    if not os.path.isfile(real):
+        return None  # 陈旧记录，跳过而非阻断备份
+    return real
+
+
+def _collect_kb_sources(db, kb_root):
+    """从 KnowledgeFile.path 读取真实知识源文件清单（P1-4）。
+
+    不再递归整棵工作目录（如 saves/data，会带上 server.db 等非知识文件），
+    只收集 knowledge_files 表登记过的源文件，逐个校验位于受控根目录之内。
+    返回 [(arcname, full_path), ...]，arcname 形如 knowledge/<相对路径>。
+    """
+    if not kb_root:
+        return []
+    root_abs = os.path.abspath(os.path.normpath(str(kb_root)))
+    try:
+        rows = db.query(KnowledgeFile).all()
+    except Exception as exc:
+        logger.warning("读取知识源文件清单失败，忽略知识库备份: %s", exc)
+        return []
     files = []
-    for root in kb_roots or []:
-        real = os.path.realpath(str(root))
-        if not os.path.isdir(real):
+    seen = set()
+    for row in rows:
+        real = _validate_kb_source(getattr(row, "path", None), root_abs)
+        if real is None:
             continue
-        for dirpath, dirnames, filenames in os.walk(real):
-            dirnames[:] = [d for d in dirnames if not _SENSITIVE_FILENAME.search(d)]
-            for fn in filenames:
-                if _SENSITIVE_FILENAME.search(fn):
-                    continue
-                full = os.path.join(dirpath, fn)
-                rel = os.path.relpath(full, real)
-                files.append((os.path.join("knowledge", rel).replace("\\", "/"), full))
+        rel = os.path.relpath(real, root_abs)
+        arcname = os.path.join("knowledge", rel).replace("\\", "/")
+        if _SENSITIVE_FILENAME.search(arcname) or arcname in seen:
+            continue
+        seen.add(arcname)
+        files.append((arcname, real))
     return files
 
 
@@ -165,7 +198,7 @@ def create_backup(
     log_path=None,
     include_logs=True,
     include_kb=False,
-    kb_roots=(),
+    kb_root=None,
     created_by="",
     note=None,
 ):
@@ -225,13 +258,17 @@ def create_backup(
             shutil.copyfile(log_path, log_target)
             entries.append({"path": "logs/app.log", "size": os.path.getsize(log_target)})
 
-        # 4) 可选知识源文件（限制在白名单根目录内）
-        if include_kb:
-            for arcname, full in _collect_kb_files(kb_roots):
-                target = os.path.join(staging, *arcname.split("/"))
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                shutil.copyfile(full, target)
-                entries.append({"path": arcname, "size": os.path.getsize(target)})
+        # 4) 可选知识源文件：真实清单来自 KnowledgeFile.path（P1-4），
+        #    逐个校验位于受控根目录内后再入归档
+        kb_size = 0
+        kb_files = _collect_kb_sources(db, kb_root) if (include_kb and kb_root) else []
+        for arcname, full in kb_files:
+            target = os.path.join(staging, *arcname.split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copyfile(full, target)
+            sz = os.path.getsize(target)
+            entries.append({"path": arcname, "size": sz})
+            kb_size += sz
 
         manifest = {
             "manifest_version": BACKUP_MANIFEST_VERSION,
@@ -239,6 +276,7 @@ def create_backup(
             "created_by": created_by,
             "include_logs": bool(include_logs),
             "include_kb": bool(include_kb),
+            "kb_sources": {"count": len(kb_files), "size_bytes": kb_size},
             "entries": entries,
         }
         with open(os.path.join(staging, "manifest.json"), "w", encoding="utf-8") as f:
@@ -359,6 +397,163 @@ def preview_restore(db: Session, backup_id: int, backup_dir: str, targets: dict,
     }
 
 
+def _fmt_db_dt(value):
+    """把 ORM 读出的 datetime 转成 sqlite3 可安全写入的字符串；None 原样保留。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="seconds")
+    return str(value)
+
+
+def _backup_row_meta(row) -> dict:
+    """捕获 BackupJob 行的全部可恢复字段（供恢复后重新登记恢复点元数据）。"""
+    return {
+        "id": row.id,
+        "filename": row.filename,
+        "path": row.path,
+        "size_bytes": row.size_bytes,
+        "sha256": row.sha256,
+        "manifest_version": row.manifest_version,
+        "status": row.status,
+        "created_by": row.created_by,
+        "created_at": _fmt_db_dt(row.created_at),
+        "verified_at": _fmt_db_dt(row.verified_at),
+        "note": row.note,
+    }
+
+
+def _reinsert_restore_point(db_path, meta):
+    """把恢复点的备份记录重新写回恢复后的数据库。
+
+    恢复会把 server.db 整体替换为旧备份快照（其中不含"恢复点"这条新记录），
+    因此必须在恢复完成后，用独立 sqlite3 连接把恢复点元数据按原 id 插回，
+    否则 restore_point_id 无法被列表/详情/校验接口读取。失败视为恢复不完整，
+    交给调用方回滚。
+    """
+    if not db_path or not meta:
+        raise BackupError("恢复点元数据缺失，无法登记", 500)
+    cols = (
+        "id, filename, path, size_bytes, sha256, manifest_version, status, "
+        "created_by, created_at, verified_at, note"
+    )
+    values = (
+        meta["id"], meta["filename"], meta["path"], meta["size_bytes"],
+        meta["sha256"], meta["manifest_version"], meta["status"],
+        meta["created_by"], meta["created_at"], meta["verified_at"], meta["note"],
+    )
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO backup_jobs ({}) VALUES (?,?,?,?,?,?,?,?,?,?,?)".format(cols),
+                values,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise BackupError("恢复点登记写入失败：{}".format(exc), 500)
+
+
+def _rollback_file(kind, entry, failures):
+    """把单个文件目标恢复为快照；目标原本不存在则删除恢复过程中新建的目标。
+
+    任何失败都记入 failures 并继续，绝不静默忽略。
+    """
+    target = entry["target"]
+    try:
+        if entry.get("absent"):
+            if os.path.lexists(target):
+                os.remove(target)
+            return
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(entry["snap"], target)
+    except Exception as exc:
+        failures.append("{}回滚失败：{}".format(kind, exc))
+
+
+def _rollback_tree(kind, entry, failures):
+    """把目录目标整棵恢复为快照；目标原本不存在则删除恢复过程新建的目录。
+
+    任何失败都记入 failures 并继续，绝不静默忽略。
+    """
+    target = entry["target"]
+    try:
+        if entry.get("absent"):
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            return
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        shutil.copytree(entry["snap"], target)
+    except Exception as exc:
+        failures.append("{}回滚失败：{}".format(kind, exc))
+
+
+class _RestoreRollback:
+    """恢复回滚日志（P1-4）：修改真实目标前先登记可恢复快照，失败时逆序全量回滚。
+
+    - 数据库快照复用恢复点 zip（创建于任何目标被修改之前，字节级一致）。
+    - 配置/日志在各自修改前复制到本日志目录；知识目录整棵复制到快照目录。
+      目标原本不存在时记录"应删除"，回滚时删除恢复过程新建的目标。
+    - rollback() 按逆序（知识目录→日志→配置→数据库）回滚所有已登记目标；
+      任一步失败继续回滚其余目标并汇总失败列表，供调用方报告回滚是否完整。
+    """
+
+    def __init__(self, workdir, restore_point_zip):
+        self.workdir = workdir
+        self.restore_point_zip = restore_point_zip
+        self._db = None      # {"zip": ..., "target": ...}
+        self._config = None  # {"snap": ...} 或 {"absent": True, "target": ...}
+        self._log = None
+        self._kb = None
+        self.failed_step = None  # 记录当前正在应用的目标，供异常时报告
+
+    def snapshot_db(self, db_path):
+        # 快照 = 恢复点 zip 内的 server.db（恢复前未被任何目标修改所影响）
+        self._db = {"zip": self.restore_point_zip, "target": db_path}
+
+    def _snap_file(self, kind, target):
+        if not target:
+            return {"absent": True, "target": target}
+        if os.path.exists(target):
+            snap = os.path.join(self.workdir, "{}.bak".format(kind))
+            shutil.copy2(target, snap)
+            return {"snap": snap, "target": target}
+        return {"absent": True, "target": target}
+
+    def snapshot_config(self, config_target):
+        self._config = self._snap_file("config", config_target)
+
+    def snapshot_log(self, log_target):
+        self._log = self._snap_file("log", log_target)
+
+    def snapshot_kb(self, kb_root):
+        if kb_root and os.path.isdir(kb_root):
+            snap = os.path.join(self.workdir, "kb_snapshot")
+            shutil.copytree(kb_root, snap)
+            self._kb = {"snap": snap, "target": kb_root}
+        else:
+            self._kb = {"absent": True, "target": kb_root}
+
+    def rollback(self):
+        """逆序回滚已登记目标。返回 (complete: bool, failures: list[str])。"""
+        failures = []
+        if self._kb is not None:
+            _rollback_tree("知识目录", self._kb, failures)
+        if self._log is not None:
+            _rollback_file("日志", self._log, failures)
+        if self._config is not None:
+            _rollback_file("配置", self._config, failures)
+        if self._db is not None:
+            try:
+                _rollback_db(self._db["zip"], self._db["target"])
+            except Exception as exc:
+                failures.append("数据库回滚失败：{}".format(exc))
+        return (not failures, failures)
+
+
 def restore_backup(
     db: Session,
     backup_id: int,
@@ -370,7 +565,7 @@ def restore_backup(
     kb_target_root: str = None,
     config_snapshot=None,
     log_path=None,
-    kb_roots=(),
+    kb_root=None,
     created_by="",
 ) -> dict:
     """正式恢复：校验一次性令牌 → 创建恢复点 → 空间检查 → 安全解压到暂存 →
@@ -387,6 +582,7 @@ def restore_backup(
     if log_target:
         targets["logs/app.log"] = log_target
 
+    journal = None
     try:
         # 2) 恢复前自动创建恢复点（先取 ID 与路径，后续恢复会改写数据库，ORM 对象会失效）
         restore_point = create_backup(
@@ -396,13 +592,15 @@ def restore_backup(
             config_snapshot or {},
             log_path=log_path,
             include_logs=True,
-            include_kb=bool(kb_roots),
-            kb_roots=kb_roots,
+            include_kb=bool(kb_root),
+            kb_root=kb_root,
             created_by=created_by,
             note="restore point before restore #{}".format(backup_id),
         )
         restore_point_id = restore_point.id
         restore_point_zip = os.path.join(backup_dir, restore_point.path)
+        # 恢复会覆盖数据库，必须先捕获恢复点记录本身，恢复完成后按原 id 插回
+        restore_point_meta = _backup_row_meta(restore_point)
 
         # 3) 磁盘空间检查（估算解压后大小）
         _ensure_disk_space(backup_dir, os.path.getsize(path) * 2 + 1024 * 1024)
@@ -414,35 +612,70 @@ def restore_backup(
                 _safe_extract(zf, staging)
 
             staged_db = os.path.join(staging, "server.db")
-            # 5) 校验解压出的数据库副本
+            # 5) 校验解压出的数据库副本（此时仍未修改任何真实目标）
             if not os.path.exists(staged_db):
                 raise BackupError("备份缺少 server.db，无法恢复", 400)
             if not _check_sqlite_ok(staged_db):
                 raise BackupError("备份中的 server.db 已损坏", 400)
 
-            # 6) 通过 SQLite Backup API 写入活动数据库（事务安全，兼容 Windows 文件占用）
+            # 6) 回滚日志：从这一步起修改真实目标。每个目标修改前先登记
+            #    可恢复快照，任一步失败都按逆序（知识目录→日志→配置→数据库）
+            #    全量回滚，并报告失败步骤与回滚是否完整。
+            rollback_dir = tempfile.mkdtemp(prefix="bk_rollback_", dir=backup_dir)
+            journal = _RestoreRollback(rollback_dir, restore_point_zip)
+
+            # 6.1) 数据库：通过 SQLite Backup API 写入活动数据库
+            journal.failed_step = "数据库"
+            journal.snapshot_db(db_path)
             if db_path and os.path.dirname(db_path):
                 os.makedirs(os.path.dirname(db_path), exist_ok=True)
             _restore_into(db_path, staged_db)
 
-            # 7) 应用配置与日志
+            # 6.2) 配置
+            journal.failed_step = "配置"
+            journal.snapshot_config(config_target)
             _apply_staged_file(os.path.join(staging, "config.json"), config_target)
+
+            # 6.3) 日志
+            journal.failed_step = "日志"
+            journal.snapshot_log(log_target)
             if log_target and os.path.exists(os.path.join(staging, "logs", "app.log")):
                 os.makedirs(os.path.dirname(log_target), exist_ok=True)
                 shutil.copyfile(os.path.join(staging, "logs", "app.log"), log_target)
+
+            # 6.4) 知识目录
+            journal.failed_step = "知识目录"
+            journal.snapshot_kb(kb_target_root)
             if kb_target_root:
                 _apply_kb_tree(os.path.join(staging, "knowledge"), kb_target_root)
 
+            # 7) 恢复点登记：数据库已被旧快照覆盖，把恢复点记录按原 id 重新写回，
+            #    保证 restore_point_id 在恢复后可被列表/详情/校验接口读取（含重启后）。
+            journal.failed_step = "恢复点登记"
+            _reinsert_restore_point(db_path, restore_point_meta)
+
+            # 8) 完成
             row.status = "completed"
             row.note = "restored at {}".format(_now_iso())
             db.commit()
             db.refresh(row)
             return {"backup_id": backup_id, "restore_point_id": restore_point_id, "status": "completed"}
-        except Exception:
-            # 数据库已被替换但校验失败：回滚到恢复点副本
-            _rollback_db(restore_point_zip, db_path)
+        except Exception as exc:
+            if journal is not None:
+                complete, failures = journal.rollback()
+                step = journal.failed_step or "未知步骤"
+                detail = "已回滚至恢复前状态" if complete else "回滚不完整：{}".format("；".join(failures))
+                logger.exception(
+                    "restore failed at %s; rollback %s", step,
+                    "complete" if complete else "incomplete",
+                )
+                raise BackupError(
+                    "恢复失败（{}）：{}；{}".format(step, exc, detail), 500
+                ) from exc
             raise
         finally:
+            if journal is not None:
+                shutil.rmtree(journal.workdir, ignore_errors=True)
             shutil.rmtree(staging, ignore_errors=True)
     except BackupError:
         raise
@@ -486,9 +719,9 @@ def _restore_into(target_path, source_path):
 
 
 def _rollback_db(restore_point_zip, db_path):
-    if not os.path.exists(restore_point_zip):
-        logger.error("restore point backup missing, cannot roll back db: %s", restore_point_zip)
-        return
+    """从恢复点 zip 恢复数据库；失败抛 BackupError（不允许静默忽略回滚失败）。"""
+    if not restore_point_zip or not os.path.exists(restore_point_zip):
+        raise BackupError("恢复点备份缺失，无法回滚数据库", 500)
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmpf:
@@ -498,8 +731,8 @@ def _rollback_db(restore_point_zip, db_path):
                 shutil.copyfileobj(src, out)
         _restore_into(db_path, tmp_path)
         logger.info("database rolled back from restore point")
-    except Exception:
-        logger.exception("failed to roll back database from restore point")
+    except Exception as exc:
+        raise BackupError("数据库回滚失败：{}".format(exc), 500) from exc
     finally:
         if tmp_path:
             try:
