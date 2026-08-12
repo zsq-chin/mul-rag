@@ -65,6 +65,7 @@ ALLOWED_MULTIMODAL_REF_FILES = {
     "server/routers/chat_router.py",
     "server/services/http_clients.py",
     "server/services/monitoring_service.py",
+    "server/services/alert_service.py",  # J.6：多模态运行健康告警规则（经 monitoring 评估）
 }
 
 # H3.1：穷举扫描根目录（本机功能模块所在的引用面）
@@ -112,7 +113,12 @@ class H31LocalFeatureIsolationTests(unittest.TestCase):
         src = (ROOT / "server" / "services" / "monitoring_service.py").read_text(
             encoding="utf-8"
         )
-        allowed = {"_default_multimodal_probe", "check_multimodal", "dependencies"}
+        allowed = {
+            "_default_multimodal_probe",
+            "check_multimodal",
+            "check_multimodal_observability",  # J.6：运行健康汇总（供依赖页与告警评估）
+            "dependencies",
+        }
         hits = set(_functions_referencing(src, "multimodal"))
         unexpected = sorted(hits - allowed)
         self.assertEqual(

@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlencode, urlsplit
 import requests
 
 from server.services.http_clients import get_multimodal_sync_session
+from server.utils import multimodal_ops
 
 try:
     from src.utils.logging_config import logger
@@ -816,6 +817,18 @@ class MultimodalRemoteClient:
         if len(query_text) > 5000:
             query_text = query_text[:5000]
 
+        # J.4：熔断 OPEN 时快速失败降级，普通聊天继续工作并收到明确提示
+        if not multimodal_ops.should_allow_request():
+            self.errors += 1
+            return {
+                "results": [],
+                "message": "多模态远端暂不可用（已自动降级，稍后自动恢复）",
+                "kb_id": kb_id,
+                "kb_name": kb_name,
+                "file_id": file_id,
+                "status": "degraded",
+            }
+
         trace_id = new_multimodal_trace_id()
         headers = build_service_auth_headers(trace_id)
 
@@ -838,6 +851,12 @@ class MultimodalRemoteClient:
             self.errors += 1
             elapsed_ms = (time.monotonic() - t0) * 1000.0
             logger.error(format_redacted_upstream_error(trace_id, "index/search", None, elapsed_ms, type(exc).__name__))
+            # J.1/J.4：超时计入超时指标并反馈熔断；传输错误同为熔断失败
+            multimodal_ops.record_route_result(
+                "POST index/search", duration_ms=elapsed_ms, ok=False,
+                timeout=isinstance(exc, requests.Timeout),
+                status_code=None, upstream=True,
+            )
             return {
                 "results": [],
                 "message": "远端多模态检索失败（已记录，可重试）",
@@ -867,6 +886,12 @@ class MultimodalRemoteClient:
             else:
                 message = response.text
 
+            # J.1/J.4：4xx 业务错误不熔断（上游可达）；5xx/429/503 才熔断
+            multimodal_ops.record_route_result(
+                "POST index/search", duration_ms=elapsed_ms, ok=False,
+                status_code=response.status_code, upstream=True,
+                upstream_ok=multimodal_ops.upstream_business_error(response.status_code),
+            )
             return {
                 "results": [],
                 "message": message,
@@ -878,6 +903,11 @@ class MultimodalRemoteClient:
             }
 
         results = normalize_multimodal_results(payload, kb_id=kb_id)
+        # J.1/J.4：成功响应反馈熔断成功
+        multimodal_ops.record_route_result(
+            "POST index/search", duration_ms=elapsed_ms, ok=True,
+            status_code=response.status_code, upstream=True, upstream_ok=True,
+        )
 
         return {
             "results": results,

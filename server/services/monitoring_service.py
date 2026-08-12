@@ -246,6 +246,44 @@ def check_multimodal(timeout=5.0, probe=None, base_url=None):
     return {"status": "healthy", "detail": "远端多模态 /health ok"}
 
 
+def check_multimodal_observability(now=None, window_seconds=None, timeout=5.0, probe=None, base_url=None, probe_result=None):
+    """J.6 多模态运行健康汇总：探针可达性 + 熔断状态 + 指标窗口。
+
+    供依赖页展示与告警规则评估；probe 可注入，离线可单测。
+    ``probe_result`` 可复用 dependencies() 已执行一次的探针结果，避免重复网络请求。
+    返回 dict 同时含 ``status``（healthy/degraded/down/unavailable）与
+    multimodal_ops.degraded_summary() 的窗口指标（错误率/p95/超时/图片字节/池耗尽/
+    查询扩展预算耗尽）。
+    """
+    from server.utils import multimodal_ops
+
+    if probe_result is None:
+        probe_result = check_multimodal(timeout=timeout, probe=probe, base_url=base_url)
+    summary = multimodal_ops.degraded_summary(now=now, window_seconds=window_seconds)
+    summary["reachability"] = probe_result["status"]
+    summary["reachability_detail"] = probe_result["detail"]
+
+    if probe_result["status"] == "unavailable":
+        summary["status"] = "unavailable"
+        summary["detail"] = probe_result["detail"]
+        return summary
+    if probe_result["status"] == "down":
+        summary["status"] = "down"
+        summary["detail"] = probe_result["detail"]
+        return summary
+    if summary["breaker_state"] in ("open", "half_open"):
+        summary["status"] = "degraded"
+        summary["detail"] = f"熔断状态 {summary['breaker_state']}，多模态请求已自动降级"
+        return summary
+    if probe_result["status"] == "degraded":
+        summary["status"] = "degraded"
+        summary["detail"] = probe_result["detail"]
+        return summary
+    summary["status"] = "healthy"
+    summary["detail"] = "远端多模态 /health ok，熔断关闭"
+    return summary
+
+
 def last_backup(db):
     """最近一次备份结果。"""
     row = db.query(BackupJob).order_by(BackupJob.id.desc()).first()
@@ -324,8 +362,15 @@ def dependencies(db, ctx, timeout=3.0, milvus_probe=None, neo4j_probe=None, gpu_
         ),
         "gpu": check_gpu(timeout=gpu_timeout),
         "multimodal": check_multimodal(timeout=timeout, probe=multimodal_probe),
+        "multimodal_observability": None,  # J.6：下方基于同一次探针填充
         "last_backup": last_backup(db),
         "last_alert": last_alert(db),
     }
-    local_checks = {key: value for key, value in checks.items() if key != "multimodal"}
+    checks["multimodal_observability"] = check_multimodal_observability(
+        timeout=timeout, probe=multimodal_probe, probe_result=checks["multimodal"],
+    )
+    # I3.3/J.6：远端多模态（含可观测性汇总）不计入本地聚合，远端离线不算本机故障
+    local_checks = {
+        key: value for key, value in checks.items() if not key.startswith("multimodal")
+    }
     return {"status": _overall(local_checks), "dependencies": checks}

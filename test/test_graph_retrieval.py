@@ -69,6 +69,11 @@ _stub_mm_remote = types.ModuleType("server.utils.multimodal_remote")
 _stub_mm_remote.format_multimodal_context = MagicMock(return_value="")
 _stub_mm_remote.search_multimodal_remote = MagicMock(return_value={})
 
+_stub_mm_ops = types.ModuleType("server.utils.multimodal_ops")
+_stub_mm_ops.content_version = types.SimpleNamespace(current=0)
+_stub_mm_ops.should_allow_request = MagicMock(return_value=True)
+_stub_mm_ops.record_query_expansion = MagicMock()
+
 # -- src.config stub (SimpleConfig-like: dict + attr access) ---------------
 
 class _StubConfig(dict):
@@ -212,6 +217,7 @@ _stub_names = [
     "src", "src.core", "src.config", "src.utils", "src.utils.logging_config",
     "src.utils.prompts", "src.models", "src.models.rerank_model",
     "src.core.operators", "server", "server.utils", "server.utils.multimodal_remote",
+    "server.utils.multimodal_ops",
     "torch", "neo4j", "neo4j.GraphDatabase", "chardet", "requests",
 ]
 
@@ -228,6 +234,7 @@ _stub_map = {
     "server": _stub_server,
     "server.utils": _stub_server_utils,
     "server.utils.multimodal_remote": _stub_mm_remote,
+    "server.utils.multimodal_ops": _stub_mm_ops,
     "torch": _stub_torch,
     "neo4j": _stub_neo4j,
     "neo4j.GraphDatabase": _stub_neo4j_gd,

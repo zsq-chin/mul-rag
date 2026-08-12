@@ -153,8 +153,13 @@ def setUpModule():
     _src_core.__path__ = [str(_PROJECT_ROOT / "src" / "core")]
     _src_models = _make_module("src.models", select_model=MagicMock())
     _make_module("src", config=_cfg, knowledge_base=_kb, graph_base=MagicMock())
+    _make_module(
+        "server.utils.multimodal_ops",
+        content_version=types.SimpleNamespace(current=0),
+        record_query_expansion=MagicMock(),
+    )
     _make_module("server", )
-    _make_module("server.utils")
+    _make_module("server.utils", multimodal_ops=sys.modules["server.utils.multimodal_ops"])
 
     # Load the real graph_retrieval helpers (pure, no side effects).
     _helpers_path = _PROJECT_ROOT / "src" / "core" / "graph_retrieval.py"
@@ -675,6 +680,35 @@ class MultiRoundRetrievalTests(unittest.TestCase):
         self.assertEqual(refs["multimodal_knowledge_base"]["status"], "budget_reached")
         self.assertEqual(refs["multimodal_knowledge_base"]["budget_limit"], 2)
         self.assertLessEqual(refs["multimodal_knowledge_base"]["budget_used"], 2)
+
+    def test_multimodal_degraded_keeps_chat_with_clear_message(self):
+        """J.4：远端自动降级（熔断/暂不可用）时普通聊天继续工作并收到明确提示。
+
+        降级快速失败不消耗远端预算；整体状态聚合为 degraded（而非伪装成空/普通失败），
+        消息明确；普通知识库检索不受影响。
+        """
+        model = _ScriptedModel([("GEN", json.dumps(["q1"])), _assess_ok()])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")], "q1": [_res(1, "a")]})
+        r, kb = _make_retriever(kb, model)
+
+        def _degraded_mm(query, meta=None):
+            return {
+                "results": [],
+                "message": "多模态远端暂不可用（已自动降级，稍后自动恢复）",
+                "kb_id": "kb", "kb_name": "mm", "status": "degraded",
+            }
+
+        _mm_remote.search_multimodal_remote.side_effect = _degraded_mm
+
+        refs = r.multi_round_retrieval(
+            "原始问题", [], {"query": "原始问题", "history": [], "meta": _meta(use_multimodal_kb=True, topK=10)},
+        )
+        mm = refs["multimodal_knowledge_base"]
+        self.assertEqual(mm["status"], "degraded")
+        self.assertIn("已自动降级", mm.get("message") or "")
+        self.assertEqual(mm["budget_used"], 0, "降级快速失败不消耗远端预算")
+        # 普通知识库检索照常工作（聊天继续）
+        self.assertTrue(refs["knowledge_base"]["results"])
 
     def test_multimodal_near_duplicate_subqueries_deduped(self):
         """近似重复的子问题（仅尾部标点/空白不同）只触发一次远端检索。"""

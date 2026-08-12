@@ -37,7 +37,28 @@ RULE_TYPES = {
     "neo4j": "Neo4j 不可用",
     "gpu_mem": "GPU 显存使用率",
     "backup_fail": "备份连续失败",
+    # J.6：多模态运行健康（探针可达性 + 熔断 + 指标窗口）
+    "mm_down": "多模态远端不可达/熔断",
+    "mm_error_rate": "多模态窗口错误率",
+    "mm_p95": "多模态 p95 延迟",
+    "mm_timeout": "多模态窗口超时次数",
+    "mm_image_bytes": "多模态窗口图片字节量",
+    "mm_pool": "多模态并发池耗尽",
+    "mm_budget": "多模态查询扩展预算耗尽",
 }
+
+# J.6：多模态运行健康告警类型集合（统一走 check_multimodal_observability 评估）
+MM_RULE_TYPES = frozenset(
+    {
+        "mm_down",
+        "mm_error_rate",
+        "mm_p95",
+        "mm_timeout",
+        "mm_image_bytes",
+        "mm_pool",
+        "mm_budget",
+    }
+)
 
 
 class AlertError(Exception):
@@ -313,7 +334,67 @@ def _consecutive_backup_failures(db):
     return n
 
 
-def _evaluate_rule(db, rule, ctx, milvus_probe=None, neo4j_probe=None):
+def _evaluate_mm_rule(rule, ctx, multimodal_probe=None):
+    """J.6 多模态运行健康告警：探针可达性 + 熔断 + 指标窗口（probe 可注入，离线可测）。
+
+    探针真实 I/O 超时由 requests.get(timeout=3.0) 保证；窗口指标来自
+    multimodal_ops.degraded_summary()（纯内存，无网络）。
+    """
+    res = monitoring_service.check_multimodal_observability(
+        timeout=3.0, probe=multimodal_probe,
+    )
+    rt = rule.rule_type
+    status = res.get("status")
+    breaker_state = res.get("breaker_state")
+    count = int(res.get("count") or 0)
+    error_rate = float(res.get("error_rate") or 0.0)
+    timeouts = int(res.get("timeouts") or 0)
+    p95 = float(res.get("p95_ms") or 0.0)
+    image_bytes = int(res.get("image_bytes") or 0)
+    pool_exhausted = int(res.get("pool_exhausted") or 0)
+    qe = res.get("query_expansion") or {}
+    budget_reached = int(qe.get("budget_reached") or 0)
+
+    if rt == "mm_down":
+        fault = status in ("down",) or breaker_state == "open"
+        return fault, res.get("detail") or "多模态状态 {}（熔断 {}）".format(status, breaker_state)
+    if rt == "mm_error_rate":
+        threshold = float(rule.threshold or 50)
+        return (
+            count > 0 and error_rate * 100 >= threshold,
+            "多模态窗口错误率 {:.1f}%（阈值 {}%，样本 {}）".format(error_rate * 100, threshold, count),
+        )
+    if rt == "mm_p95":
+        threshold = float(rule.threshold or 5000)
+        return (
+            count > 0 and p95 >= threshold,
+            "多模态 p95 延迟 {:.0f}ms（阈值 {}ms，样本 {}）".format(p95, threshold, count),
+        )
+    if rt == "mm_timeout":
+        threshold = max(1, int(rule.threshold or 3))
+        return timeouts >= threshold, "多模态窗口超时 {} 次（阈值 {}）".format(timeouts, threshold)
+    if rt == "mm_image_bytes":
+        threshold = float(rule.threshold or 500 * 1024 * 1024)
+        return (
+            image_bytes >= threshold,
+            "多模态窗口图片字节 {:.1f}MB（阈值 {:.1f}MB）".format(
+                image_bytes / 1048576.0, threshold / 1048576.0
+            ),
+        )
+    if rt == "mm_pool":
+        threshold = max(1, int(rule.threshold or 10))
+        return pool_exhausted >= threshold, "多模态并发池耗尽 {} 次（阈值 {}）".format(
+            pool_exhausted, threshold
+        )
+    if rt == "mm_budget":
+        threshold = max(1, int(rule.threshold or 10))
+        return budget_reached >= threshold, "多模态查询扩展预算耗尽 {} 次（阈值 {}）".format(
+            budget_reached, threshold
+        )
+    return False, "未知多模态规则类型"
+
+
+def _evaluate_rule(db, rule, ctx, milvus_probe=None, neo4j_probe=None, multimodal_probe=None):
     """返回 (fault, detail)。单个规则评估失败只返回 (True, 错误信息)。"""
     rt = rule.rule_type
     try:
@@ -351,6 +432,8 @@ def _evaluate_rule(db, rule, ctx, milvus_probe=None, neo4j_probe=None):
             threshold = max(1, int(rule.threshold or 1))
             n = _consecutive_backup_failures(db)
             return n >= threshold, "连续 {} 次备份失败/未完成（阈值 {}）".format(n, threshold)
+        if rt in MM_RULE_TYPES:
+            return _evaluate_mm_rule(rule, ctx, multimodal_probe)
     except (TypeError, ValueError):
         return True, "规则阈值非法：{}".format(rule.threshold)
     except Exception as exc:  # noqa: BLE001
@@ -359,17 +442,20 @@ def _evaluate_rule(db, rule, ctx, milvus_probe=None, neo4j_probe=None):
     return False, "未知规则类型"
 
 
-def evaluate_rules(db: Session, ctx, now=None, milvus_probe=None, neo4j_probe=None, notify=None):
+def evaluate_rules(db: Session, ctx, now=None, milvus_probe=None, neo4j_probe=None, multimodal_probe=None, notify=None):
     """执行一次全部启用规则的检查：触发/去重/冷却/恢复并写事件。
 
     notify: 可选回调 notify(rule, subject, body, is_resolve)，由路由层注入
             SMTP 发送实现；测试注入记录型 stub。
+    multimodal_probe: J.6 多模态探针（可注入），缺省走默认 /health 探针。
     """
     now = now or datetime.now()
     rules = db.query(AlertRule).filter(AlertRule.enabled == 1).all()
     fired, resolved = [], []
     for rule in rules:
-        fault, detail = _evaluate_rule(db, rule, ctx, milvus_probe, neo4j_probe)
+        fault, detail = _evaluate_rule(
+            db, rule, ctx, milvus_probe, neo4j_probe, multimodal_probe
+        )
         last = _last_event(db, rule.id)
         if fault:
             # 冷却期内已有 firing/acknowledged 事件则去重，避免邮件风暴

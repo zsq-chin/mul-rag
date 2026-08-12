@@ -10,6 +10,7 @@ from src.models.rerank_model import get_reranker
 from src.utils.logging_config import logger
 from src.models import select_model
 from src.core.operators import HyDEOperator
+from server.utils import multimodal_ops
 from server.utils.multimodal_remote import format_multimodal_context, search_multimodal_remote
 from src.core.graph_retrieval import (
     normalize_entities,
@@ -73,6 +74,8 @@ class _MMSearchCache:
         identity = "|".join(
             [permission, kb, file, str(query or "").strip()]
             + [f"{k}={v}" for k, v in sorted(params.items())]
+            # J.5：键含内容版本，管理变更后旧缓存键自动失效
+            + ["v=" + str(multimodal_ops.content_version.current)]
         )
         return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
@@ -609,7 +612,8 @@ class Retriever:
             return "deadline_reached"
         if has_results:
             return "ok"
-        for state in ("error", "no_kb_selected", "empty"):
+        # J.4：远端自动降级（熔断/暂不可用）优先于普通失败呈现，普通聊天收到明确提示
+        for state in ("degraded", "error", "no_kb_selected", "empty"):
             if state in statuses:
                 return state
         return ""
@@ -752,6 +756,11 @@ class Retriever:
             except Exception as e:
                 logger.error(f"多模态知识库检索失败: {e}")
                 mm_res = {"results": [], "message": f"多模态知识库检索失败: {e}", "status": "error"}
+            if mm_res.get("status") == "degraded":
+                # J.4：远端自动降级（熔断/暂不可用）不消耗预算、不缓存，
+                # 普通聊天继续工作并收到明确提示；半开探测流量不被缓存吞掉
+                mm_statuses.append("degraded")
+                return mm_res, False, None
             mm_budget_used += 1
             # 错误/未选库结果不缓存，避免把瞬时失败或权限态在 TTL 内当成确定结果
             if mm_cache_ttl > 0 and mm_res.get("status") not in ("error", "no_kb_selected"):
@@ -974,6 +983,15 @@ class Retriever:
                 max_items=mm_max_items,
                 max_text_chars=mm_max_text_chars,
                 max_images=mm_max_images,
+            )
+            # J.2：记录本次问答实际远端调用数、去重前后结果数、预算是否耗尽、轮数
+            # （只含无意义计数，绝不记录问题文本）
+            multimodal_ops.record_query_expansion(
+                remote_calls=mm_budget_used,
+                before_dedup=len(multimodal_merged),
+                after_dedup=len(self._dedupe_multimodal(multimodal_merged)),
+                budget_reached=mm_budget_hit,
+                rounds=len(round_log),
             )
             mm_status = self._aggregate_mm_status(
                 statuses=mm_statuses,
