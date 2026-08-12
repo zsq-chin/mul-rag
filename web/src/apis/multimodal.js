@@ -91,8 +91,6 @@ export const parseFile = (data) => ragRequest.post('/pdf/parse', data)
 
 export const getFileStatus = (params) => ragRequest.get('/pdf/status', { params })
 
-export const getPdfImages = (params) => ragRequest.get('/pdf/images', { params })
-
 export const getPdfImagesList = (params) => ragRequest.get('/pdf/images_list', { params })
 
 export const getPdfImageSummaries = (params) => ragRequest.get('/pdf/image_summaries', { params })
@@ -183,7 +181,3 @@ export const queryStructuredDb = (data) => ragRequest.post('/structured-db/query
 
 // ================= Query / Chat =================
 export const unifiedQuery = (data) => ragRequest.post('/query', data)
-
-export const multimodalChat = (data) => ragRequest.post('/chat', data)
-
-export const clearMultimodalChat = (data = {}) => ragRequest.post('/chat/clear', data)

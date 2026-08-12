@@ -4,6 +4,8 @@ import os
 import re
 import time
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlencode, urlsplit
 
@@ -680,3 +682,365 @@ def search_multimodal_remote(query: str, meta: dict[str, Any] | None = None) -> 
         "status": "ok" if results else "empty",
         "trace_id": trace_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# B3. 固定代理白名单与请求/响应边界策略
+#
+# 远端 `/api/multimodal/**` 不再使用全路径通用代理，改为“HTTP 方法 + 固定
+# 路径模板”白名单。每条接口显式定义权限、请求模型、超时、响应类型和大小限制。
+# 这些纯策略函数可被契约测试直接导入，路由层只负责把它们接到 FastAPI 上。
+# ---------------------------------------------------------------------------
+
+# 权限级别：检索使用接口允许任意已登录用户；管理接口仅超级管理员。
+PERMISSION_READ = "read"
+PERMISSION_ADMIN = "admin"
+
+# 请求体类型：无正文 / JSON / multipart 上传。
+BODY_NONE = "none"
+BODY_JSON = "json"
+BODY_MULTIPART = "multipart"
+
+# 响应类型：JSON（有体积上限） / 流式文件（图片/文档/下载）。
+RESPONSE_JSON = "json"
+RESPONSE_STREAM = "stream"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_JSON_BODY_BYTES = _env_int("MULTIMODAL_JSON_BODY_MAX_BYTES", 1 * 1024 * 1024)
+MAX_JSON_RESPONSE_BYTES = _env_int("MULTIMODAL_JSON_RESPONSE_MAX_BYTES", 16 * 1024 * 1024)
+MAX_STREAM_BYTES = _env_int("MULTIMODAL_STREAM_RESPONSE_MAX_BYTES", 512 * 1024 * 1024)
+MAX_UPLOAD_FILES = _env_int("MULTIMODAL_UPLOAD_MAX_FILES", 5)
+MAX_UPLOAD_FILE_BYTES = _env_int("MULTIMODAL_UPLOAD_MAX_FILE_BYTES", 50 * 1024 * 1024)
+MAX_UPLOAD_TOTAL_BYTES = _env_int("MULTIMODAL_UPLOAD_MAX_TOTAL_BYTES", 100 * 1024 * 1024)
+
+# 上传扩展名/MIME 白名单（对齐管理页目前允许的 PDF/Excel/CSV/TXT/MD/LAS 与图片）。
+ALLOWED_UPLOAD_EXTENSIONS = frozenset({
+    ".pdf", ".xlsx", ".xls", ".csv", ".txt", ".md", ".las",
+    ".docx", ".doc", ".png", ".jpg", ".jpeg", ".bmp", ".gif",
+    ".webp", ".tif", ".tiff",
+})
+ALLOWED_UPLOAD_MIMES = frozenset({
+    "application/pdf",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/csv",
+    "text/plain",
+    "text/markdown",
+    "text/x-las",
+    "application/zip",
+    "application/octet-stream",
+    "image/png", "image/jpeg", "image/gif", "image/bmp",
+    "image/webp", "image/tiff",
+})
+
+# 上传不允许的 MIME（防止把 HTML/脚本当文档入库）。
+REJECTED_UPLOAD_MIMES = frozenset({
+    "text/html",
+    "application/xhtml+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/json",
+})
+
+# 流式（文件/图片）响应的合法 Content-Type。application/json / text/html 会被拒绝。
+SAFE_STREAM_CONTENT_TYPES = frozenset({
+    "application/pdf",
+    "application/octet-stream",
+    "application/zip",
+    "application/gzip",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "text/csv",
+    "text/plain",
+    "text/markdown",
+    "text/x-las",
+})
+
+
+class MultimodalUploadError(Exception):
+    """上传校验失败（status_code + message，路由层据此返回 4xx）。"""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+
+
+@dataclass(frozen=True)
+class MultimodalRouteSpec:
+    """一条远端代理路由的完整边界定义（B3.2）。"""
+
+    method: str
+    path: str  # 相对 /api/v1 的路径模板，如 "kb/list"
+    permission: str  # PERMISSION_READ / PERMISSION_ADMIN
+    body: str  # BODY_NONE / BODY_JSON / BODY_MULTIPART
+    response: str  # RESPONSE_JSON / RESPONSE_STREAM
+    timeout_seconds: float
+    max_response_bytes: int
+    max_files: int = MAX_UPLOAD_FILES
+    max_file_bytes: int = MAX_UPLOAD_FILE_BYTES
+    max_total_bytes: int = MAX_UPLOAD_TOTAL_BYTES
+    allowed_extensions: frozenset[str] = ALLOWED_UPLOAD_EXTENSIONS
+    allowed_mimes: frozenset[str] = ALLOWED_UPLOAD_MIMES
+
+
+def _make_route_spec(
+    method: str,
+    path: str,
+    *,
+    permission: str,
+    body: str = BODY_NONE,
+    response: str = RESPONSE_JSON,
+    timeout: float = 30.0,
+    max_response_bytes: int | None = None,
+    **upload: Any,
+) -> MultimodalRouteSpec:
+    return MultimodalRouteSpec(
+        method=method,
+        path=path,
+        permission=permission,
+        body=body,
+        response=response,
+        timeout_seconds=timeout,
+        max_response_bytes=max_response_bytes or MAX_JSON_RESPONSE_BYTES,
+        **upload,
+    )
+
+
+# 白名单由管理页当前真实调用的远端接口构成（A2 契约核对后的子集）。
+# 检索接口（POST /index/search）允许任意已登录用户；其余管理接口仅超级管理员。
+MULTIMODAL_PROXY_WHITELIST: dict[tuple[str, str], MultimodalRouteSpec] = {
+    # ---- 检索使用接口（已登录用户） ----
+    ("POST", "index/search"): _make_route_spec(
+        "POST", "index/search", permission=PERMISSION_READ, body=BODY_JSON, timeout=30.0,
+    ),
+
+    # ---- 健康与知识库（超级管理员） ----
+    ("GET", "health"): _make_route_spec("GET", "health", permission=PERMISSION_ADMIN, timeout=10.0),
+    ("GET", "kb/list"): _make_route_spec("GET", "kb/list", permission=PERMISSION_ADMIN, timeout=15.0),
+    ("GET", "kb/files"): _make_route_spec("GET", "kb/files", permission=PERMISSION_ADMIN, timeout=30.0),
+    ("GET", "kb/images"): _make_route_spec("GET", "kb/images", permission=PERMISSION_ADMIN, timeout=15.0),
+    ("GET", "kb/file/dataframe"): _make_route_spec("GET", "kb/file/dataframe", permission=PERMISSION_ADMIN, timeout=60.0),
+    ("GET", "kb/file/content"): _make_route_spec("GET", "kb/file/content", permission=PERMISSION_ADMIN, timeout=60.0),
+    ("GET", "file-manager/wells"): _make_route_spec("GET", "file-manager/wells", permission=PERMISSION_ADMIN, timeout=30.0),
+
+    # ---- 文件 / PDF / 解析状态（超级管理员） ----
+    ("POST", "pdf/upload"): _make_route_spec(
+        "POST", "pdf/upload", permission=PERMISSION_ADMIN, body=BODY_MULTIPART, timeout=120.0,
+    ),
+    ("POST", "pdf/parse"): _make_route_spec("POST", "pdf/parse", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=120.0),
+    ("GET", "pdf/status"): _make_route_spec("GET", "pdf/status", permission=PERMISSION_ADMIN, timeout=15.0),
+    ("GET", "pdf/images_list"): _make_route_spec("GET", "pdf/images_list", permission=PERMISSION_ADMIN, timeout=30.0),
+    ("GET", "pdf/image_summaries"): _make_route_spec("GET", "pdf/image_summaries", permission=PERMISSION_ADMIN, timeout=30.0),
+    ("POST", "pdf/image_summaries/update"): _make_route_spec(
+        "POST", "pdf/image_summaries/update", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=120.0,
+    ),
+    ("GET", "pdf/chunk"): _make_route_spec("GET", "pdf/chunk", permission=PERMISSION_ADMIN, timeout=30.0),
+
+    # ---- 文件/图片流式响应（超级管理员） ----
+    ("GET", "kb/file/original"): _make_route_spec(
+        "GET", "kb/file/original", permission=PERMISSION_ADMIN, response=RESPONSE_STREAM, timeout=60.0,
+    ),
+    ("GET", "pdf/images"): _make_route_spec(
+        "GET", "pdf/images", permission=PERMISSION_ADMIN, response=RESPONSE_STREAM, timeout=60.0,
+    ),
+    ("GET", "pdf/page"): _make_route_spec(
+        "GET", "pdf/page", permission=PERMISSION_ADMIN, response=RESPONSE_STREAM, timeout=60.0,
+    ),
+    ("GET", "extraction/image"): _make_route_spec(
+        "GET", "extraction/image", permission=PERMISSION_ADMIN, response=RESPONSE_STREAM, timeout=60.0,
+    ),
+
+    # ---- 索引（超级管理员） ----
+    ("POST", "index/build"): _make_route_spec("POST", "index/build", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=120.0),
+    ("POST", "index/delete"): _make_route_spec("POST", "index/delete", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=60.0),
+    ("GET", "index/chunks"): _make_route_spec("GET", "index/chunks", permission=PERMISSION_ADMIN, timeout=30.0),
+    ("GET", "index/chunks/stats"): _make_route_spec("GET", "index/chunks/stats", permission=PERMISSION_ADMIN, timeout=30.0),
+
+    # ---- 知识库文件与图片管理（超级管理员） ----
+    ("POST", "kb/create"): _make_route_spec("POST", "kb/create", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=30.0),
+    ("POST", "kb/delete"): _make_route_spec("POST", "kb/delete", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=30.0),
+    ("POST", "kb/file/delete"): _make_route_spec("POST", "kb/file/delete", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=30.0),
+    ("POST", "kb/image/update"): _make_route_spec("POST", "kb/image/update", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=30.0),
+    ("POST", "kb/images/update"): _make_route_spec("POST", "kb/images/update", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=30.0),
+
+    # ---- 提取（超级管理员） ----
+    ("POST", "extraction/extract"): _make_route_spec(
+        "POST", "extraction/extract", permission=PERMISSION_ADMIN, body=BODY_MULTIPART, timeout=120.0,
+    ),
+    ("GET", "extraction/status"): _make_route_spec("GET", "extraction/status", permission=PERMISSION_ADMIN, timeout=15.0),
+    ("GET", "extraction/content"): _make_route_spec("GET", "extraction/content", permission=PERMISSION_ADMIN, timeout=60.0),
+    ("GET", "extraction/check_filename"): _make_route_spec("GET", "extraction/check_filename", permission=PERMISSION_ADMIN, timeout=15.0),
+    ("POST", "extraction/update_result"): _make_route_spec("POST", "extraction/update_result", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=60.0),
+
+    # ---- 预处理（超级管理员） ----
+    ("GET", "preprocess/methods"): _make_route_spec("GET", "preprocess/methods", permission=PERMISSION_ADMIN, timeout=15.0),
+    ("POST", "preprocess/upload"): _make_route_spec(
+        "POST", "preprocess/upload", permission=PERMISSION_ADMIN, body=BODY_MULTIPART, timeout=120.0,
+    ),
+    ("POST", "preprocess/run"): _make_route_spec("POST", "preprocess/run", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=120.0),
+    ("POST", "preprocess/workbench/run"): _make_route_spec("POST", "preprocess/workbench/run", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=120.0),
+    ("POST", "preprocess/workbench/grouped/run"): _make_route_spec("POST", "preprocess/workbench/grouped/run", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=120.0),
+    ("POST", "preprocess/workbench/store"): _make_route_spec("POST", "preprocess/workbench/store", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=120.0),
+    ("GET", "preprocess/workbench/dataframe"): _make_route_spec("GET", "preprocess/workbench/dataframe", permission=PERMISSION_ADMIN, timeout=60.0),
+    ("GET", "preprocess/report"): _make_route_spec("GET", "preprocess/report", permission=PERMISSION_ADMIN, timeout=60.0),
+    ("GET", "preprocess/dataframe"): _make_route_spec("GET", "preprocess/dataframe", permission=PERMISSION_ADMIN, timeout=60.0),
+    ("GET", "preprocess/workbench/download"): _make_route_spec(
+        "GET", "preprocess/workbench/download", permission=PERMISSION_ADMIN, response=RESPONSE_STREAM, timeout=120.0,
+    ),
+    ("GET", "preprocess/workbench/artifact/download"): _make_route_spec(
+        "GET", "preprocess/workbench/artifact/download", permission=PERMISSION_ADMIN, response=RESPONSE_STREAM, timeout=120.0,
+    ),
+
+    # ---- 结构化数据库（超级管理员） ----
+    ("GET", "structured-db/supported"): _make_route_spec("GET", "structured-db/supported", permission=PERMISSION_ADMIN, timeout=15.0),
+    ("GET", "structured-db/connections"): _make_route_spec("GET", "structured-db/connections", permission=PERMISSION_ADMIN, timeout=15.0),
+    ("POST", "structured-db/connect"): _make_route_spec("POST", "structured-db/connect", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=30.0),
+    ("POST", "structured-db/disconnect"): _make_route_spec("POST", "structured-db/disconnect", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=30.0),
+    ("GET", "structured-db/schema"): _make_route_spec("GET", "structured-db/schema", permission=PERMISSION_ADMIN, timeout=30.0),
+    ("GET", "structured-db/table"): _make_route_spec("GET", "structured-db/table", permission=PERMISSION_ADMIN, timeout=30.0),
+    ("POST", "structured-db/query"): _make_route_spec("POST", "structured-db/query", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=60.0),
+
+    # ---- 统一查询（超级管理员；检索仍在 chat_router 走 /api/chat/multimodal） ----
+    ("POST", "query"): _make_route_spec("POST", "query", permission=PERMISSION_ADMIN, body=BODY_JSON, timeout=60.0),
+}
+
+
+def route_spec_for(method: str, path: str) -> MultimodalRouteSpec | None:
+    """按“HTTP 方法 + 固定路径”精确匹配白名单；不在白名单返回 None（路由层 404/405）。"""
+    return MULTIMODAL_PROXY_WHITELIST.get((str(method or "").upper(), str(path or "").lstrip("/")))
+
+
+def whitelisted_proxy_routes() -> list[tuple[str, str]]:
+    """返回按方法/路径排序的白名单条目，用于显式注册路由（B3.1 删除通配代理）。"""
+    return sorted(MULTIMODAL_PROXY_WHITELIST, key=lambda item: (item[0], item[1]))
+
+
+def validate_upload_metadata(
+    file_metas: list[tuple[str | None, str | None, int]],
+    spec: MultimodalRouteSpec,
+) -> None:
+    """校验上传的文件数、单文件大小、总大小、扩展名与 MIME（B3.4）。
+
+    file_metas 元素为 (filename, content_type, size_bytes)。校验失败抛
+    MultimodalUploadError。路由层负责把上传流式解析（SpooledTemporaryFile，
+    超过阈值落到磁盘），不在内存中读取完整文件。
+    """
+    if len(file_metas) > spec.max_files:
+        raise MultimodalUploadError(
+            413, f"上传文件数超过限制（最多 {spec.max_files} 个）",
+        )
+
+    total = 0
+    for filename, content_type, size in file_metas:
+        extension = Path(str(filename or "")).suffix.lower()
+        if extension not in spec.allowed_extensions:
+            raise MultimodalUploadError(
+                400, f"文件类型不允许上传: {extension or '(无扩展名)'}",
+            )
+        mime = str(content_type or "").strip().lower()
+        if mime in REJECTED_UPLOAD_MIMES:
+            raise MultimodalUploadError(400, f"文件 MIME 类型不允许上传: {mime}")
+        if (
+            mime
+            and mime != "application/octet-stream"
+            and mime not in spec.allowed_mimes
+            and not mime.startswith(("image/", "text/"))
+        ):
+            raise MultimodalUploadError(400, f"文件 MIME 类型不允许上传: {mime}")
+
+        file_size = int(size or 0)
+        if file_size > spec.max_file_bytes:
+            raise MultimodalUploadError(
+                413, f"单个文件超过大小限制（{spec.max_file_bytes} 字节）",
+            )
+        total += file_size
+
+    if total > spec.max_total_bytes:
+        raise MultimodalUploadError(
+            413, f"上传总大小超过限制（{spec.max_total_bytes} 字节）",
+        )
+
+
+def map_upstream_proxy_status(status: int) -> tuple[int, str]:
+    """按 B3.7 把上游状态映射为 SAGE 响应（status_code, 通用 detail）。"""
+    if status in (400, 422):
+        return 400, "多模态远端请求参数错误"
+    if status == 404:
+        return 404, "多模态远端接口不存在"
+    if status == 429:
+        return 429, "多模态远端请求过频"
+    if status == 503:
+        return 503, "多模态远端繁忙，请稍后重试"
+    if status >= 500:
+        return 502, "多模态远端服务不可用"
+    return status, ""
+
+
+def validate_stream_content_type(content_type: str | None) -> bool:
+    """流式（文件/图片）响应的 Content-Type 白名单校验（B3.6）。
+
+    拒绝 application/json / text/html 等“错误 Content-Type”，防止把上游
+    错误页当文件返回。未知类型不阻塞（由流式转发兜底），但 JSON/HTML 一律拒绝。
+    """
+    ct = str(content_type or "").split(";", 1)[0].strip().lower()
+    if not ct:
+        return True
+    if ct in ("application/json", "text/html", "application/xhtml+xml"):
+        return False
+    if ct in SAFE_STREAM_CONTENT_TYPES:
+        return True
+    if ct.startswith(("image/", "text/")):
+        return True
+    return False
+
+
+# 允许透传给浏览器的响应头白名单。Set-Cookie / Location / content-length /
+# content-type 等一律不透传（B3.6）。
+SAFE_PROXY_RESPONSE_HEADERS = frozenset({
+    "accept-ranges",
+    "cache-control",
+    "content-disposition",
+    "content-range",
+    "etag",
+    "last-modified",
+})
+
+
+def filter_multimodal_response_headers(headers: Any) -> dict[str, str]:
+    """只转发白名单内的响应头（B3.6）。"""
+    result: dict[str, str] = {}
+    if headers is None:
+        return result
+    for key, value in headers.items():
+        if str(key).lower() in SAFE_PROXY_RESPONSE_HEADERS:
+            result[str(key)] = str(value)
+    return result
+
+
+async def accumulate_bounded_bytes(agen: Any, cap: int) -> bytes | None:
+    """从异步字节迭代器累计读取，超过 *cap* 字节返回 None（B3.5 体积上限）。
+
+    用于 JSON 响应体与 JSON 请求体：避免把超大响应整体读入内存。
+    """
+    total = 0
+    chunks: list[bytes] = []
+    async for chunk in agen:
+        total += len(chunk)
+        if total > cap:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
