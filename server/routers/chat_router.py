@@ -3,6 +3,7 @@ import json
 import asyncio
 import functools
 import queue
+import time
 import traceback
 import uuid
 from datetime import datetime # [新增] 导入 datetime
@@ -32,7 +33,10 @@ from server.models.user_model import User
 from server.models.thread_model import Thread
 from server.models.chat_model import ChatRecord, ExamPapersRecord, GuideRecord, ItemRecord, WriterRecord
 from server.utils.multimodal_remote import (
+    build_service_auth_headers,
+    format_redacted_upstream_error,
     get_multimodal_api_base,
+    new_multimodal_trace_id,
     normalize_multimodal_image_path,
     normalize_multimodal_kbs,
 )
@@ -47,20 +51,27 @@ chat = APIRouter(prefix="/chat")
 
 @chat.get("/multimodal/kbs")
 async def get_multimodal_kbs(current_user: User = Depends(get_required_user)):
+    base_url = get_multimodal_api_base()
+    if not base_url:
+        # 服务端未配置远端多模态地址：不泄露地址，直接返回空列表（普通聊天不受影响）
+        return {"kbs": [], "message": "多模态知识库未配置"}
+
+    trace_id = new_multimodal_trace_id()
+    headers = build_service_auth_headers(trace_id)
+    t0 = time.monotonic()
     async with upstream_proxy_gate:
-        base_url = get_multimodal_api_base()
         try:
-            resp = await get_multimodal_client().get(f"{base_url}/kb/list")
+            resp = await get_multimodal_client().get(f"{base_url}/kb/list", headers=headers)
             resp.raise_for_status()
             payload = resp.json()
         except (httpx.HTTPError, ValueError) as e:
-            logger.error(f"Multimodal kb list proxy error: {e}, {traceback.format_exc()}")
-            raise HTTPException(status_code=502, detail=f"澶氭ā鎬佺煡璇嗗簱鍒楄〃鍔犺浇澶辫触: {e}")
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            logger.error(
+                format_redacted_upstream_error(trace_id, "kb/list", None, elapsed_ms, type(e).__name__)
+            )
+            raise HTTPException(status_code=502, detail=f"多模态知识库列表加载失败（trace={trace_id[:8]}）") from e
 
-    return {
-        "kbs": normalize_multimodal_kbs(payload),
-        "base_url": base_url,
-    }
+    return {"kbs": normalize_multimodal_kbs(payload)}
 
 
 @chat.get("/multimodal/image")
@@ -71,10 +82,15 @@ async def get_multimodal_image(
         current_user: User = Depends(get_required_user),
         ):
     base_url = get_multimodal_api_base()
+    if not base_url:
+        raise HTTPException(status_code=503, detail="多模态知识库未配置")
+
     safe_image_path = normalize_multimodal_image_path(imagePath)
     if not safe_image_path:
         raise HTTPException(status_code=400, detail="图片路径无效")
 
+    trace_id = new_multimodal_trace_id()
+    headers = build_service_auth_headers(trace_id)
     await upstream_proxy_gate.__aenter__()
     try:
         client = get_multimodal_client()
@@ -82,6 +98,7 @@ async def get_multimodal_image(
             "GET",
             f"{base_url}/pdf/images",
             params={"kbId": kbId, "fileId": fileId, "imagePath": safe_image_path},
+            headers=headers,
         )
         resp = await client.send(upstream_request, stream=True)
     except asyncio.CancelledError:
@@ -89,8 +106,8 @@ async def get_multimodal_image(
         raise
     except Exception as e:
         await upstream_proxy_gate.__aexit__(type(e), e, e.__traceback__)
-        logger.error(f"Multimodal image proxy error: {e}, {traceback.format_exc()}")
-        raise HTTPException(status_code=502, detail=f"多模态图片加载失败: {e}")
+        logger.error(format_redacted_upstream_error(trace_id, "pdf/images", None, 0.0, type(e).__name__))
+        raise HTTPException(status_code=502, detail=f"多模态图片加载失败（trace={trace_id[:8]}）") from e
 
     async def _stream():
         try:

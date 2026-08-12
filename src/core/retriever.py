@@ -249,7 +249,6 @@ class Retriever:
             "kb_id": meta.get("multimodal_kb_id"),
             "kb_name": meta.get("multimodal_kb_name") or meta.get("multimodal_kb_id"),
             "file_id": None,
-            "base_url": None,
             "status": "",
         }
 
@@ -569,7 +568,7 @@ class Retriever:
                 logger.error(f"多模态知识库检索失败: {e}")
                 base_mm = {"results": [], "message": f"多模态知识库检索失败: {e}"}
             multimodal_merged.extend(base_mm.get("results", []))
-            mm_meta = {k: base_mm.get(k) for k in ("kb_id", "kb_name", "file_id", "base_url", "message", "status")}
+            mm_meta = {k: base_mm.get(k) for k in ("kb_id", "kb_name", "file_id", "message", "status")}
 
         rw_query = self.rewrite_query(query, history, refs)
 
@@ -586,7 +585,6 @@ class Retriever:
                 "kb_id": None,
                 "kb_name": None,
                 "file_id": None,
-                "base_url": None,
                 "status": "",
             }
             refs["multi_round"] = {
@@ -763,7 +761,6 @@ class Retriever:
                 "kb_id": None,
                 "kb_name": None,
                 "file_id": None,
-                "base_url": None,
                 "status": "",
             }
         refs["multi_round"] = {

@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from unittest.mock import Mock, patch
 
@@ -248,6 +249,11 @@ class MultimodalRemoteTests(unittest.TestCase):
         self.assertEqual(results[0]["images"][0]["name"], "图 4-2 2# 井含水习投影.png")
         self.assertIn("imagePath=", results[0]["images"][0]["url"])
 
+    @patch.dict(
+        os.environ,
+        {"MULTIMODAL_REMOTE_BASE_URL": "https://remote.example/api/v1"},
+        clear=False,
+    )
     @patch("server.utils.multimodal_remote.requests.post")
     def test_search_remote_preserves_kb_on_http_error(self, mock_post):
         response = Mock()
@@ -265,7 +271,6 @@ class MultimodalRemoteTests(unittest.TestCase):
         result = search_multimodal_remote(
             "井身结构示意图",
             {
-                "multimodal_api_base": "http://example.test/api/v1",
                 "multimodal_kb_id": "钻井井史报告",
                 "multimodal_kb_name": "钻井井史报告",
             },

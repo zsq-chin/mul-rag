@@ -11,8 +11,11 @@ from server.services.concurrency import upstream_proxy_gate
 from server.utils.auth_middleware import get_superadmin_user
 from server.utils.multimodal_remote import (
     build_multimodal_remote_url,
+    build_service_auth_headers,
     filter_multimodal_proxy_headers,
+    format_redacted_upstream_error,
     get_multimodal_api_base,
+    new_multimodal_trace_id,
     normalize_multimodal_image_page,
 )
 from src.utils.logging_config import logger
@@ -45,16 +48,25 @@ async def get_paged_kb_images(
     pageSize: int = 24,
     current_user: User = Depends(get_superadmin_user),
 ):
-    remote_url = build_multimodal_remote_url("kb/images", get_multimodal_api_base())
+    base_url = get_multimodal_api_base()
+    if not base_url:
+        raise HTTPException(status_code=503, detail="多模态知识库未配置")
+    remote_url = build_multimodal_remote_url("kb/images", base_url)
+    trace_id = new_multimodal_trace_id()
+    headers = build_service_auth_headers(trace_id)
     client = get_multimodal_client()
     try:
         async with upstream_proxy_gate:
-            response = await client.get(remote_url, params=list(request.query_params.multi_items()))
+            response = await client.get(
+                remote_url,
+                params=list(request.query_params.multi_items()),
+                headers=headers,
+            )
             response.raise_for_status()
             payload = response.json()
     except (httpx.HTTPError, ValueError) as exc:
-        logger.error(f"Multimodal image catalog proxy error: {exc}, {traceback.format_exc()}")
-        raise HTTPException(status_code=502, detail=f"多模态图片目录加载失败: {exc}") from exc
+        logger.error(format_redacted_upstream_error(trace_id, "kb/images", None, 0.0, type(exc).__name__))
+        raise HTTPException(status_code=502, detail=f"多模态图片目录加载失败（trace={trace_id[:8]}）") from exc
 
     return normalize_multimodal_image_page(payload, page=page, page_size=pageSize)
 
@@ -65,8 +77,11 @@ async def proxy_multimodal_request(
     request: Request,
     current_user: User = Depends(get_superadmin_user),
 ):
+    base_url = get_multimodal_api_base()
+    if not base_url:
+        raise HTTPException(status_code=503, detail="多模态知识库未配置")
     try:
-        remote_url = build_multimodal_remote_url(path, get_multimodal_api_base())
+        remote_url = build_multimodal_remote_url(path, base_url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

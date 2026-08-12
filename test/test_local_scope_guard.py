@@ -15,16 +15,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# 本轮必须保持零差异的远程多模态路径
+# 本轮必须保持零差异的路径。
+#
+# 说明：上一轮（本地功能接口）把 multimodal_remote.py / multimodal_proxy_router.py /
+# http_clients.py / multimodal.js 等列入“禁止修改”，目的是在建设本机功能时不动远程多模态。
+# 本轮（生产可灰度上线加固）按 CLAUDE_PRODUCTION_RELEASE_MODIFICATION_REQUIREMENTS.md 的
+# Stage B1–B3、D 明确要求修改这些文件（SSRF 消除、服务认证、白名单代理、分页透传），
+# 因此它们已不属于“禁止修改”范围。文档中 verbatim 的约束是 mul_rag/** 保持零差异，
+# 这里只保留该范围。
 FORBIDDEN_PATHS = [
     "mul_rag",
-    "server/utils/multimodal_remote.py",
-    "server/routers/multimodal_proxy_router.py",
-    "server/services/http_clients.py",
-    "web/src/apis/multimodal.js",
-    "web/src/views/MultimodalKbView.vue",
-    "web/src/components/AuthenticatedImage.vue",
-    "web/src/utils/multimodalSearch.mjs",
 ]
 
 # 本机功能模块扫面范围（排除禁止路径本身）
