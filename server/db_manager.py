@@ -26,7 +26,12 @@ class DBManager:
     """数据库管理器 - 只提供基础的数据库连接和会话管理"""
 
     def __init__(self):
-        self.db_path = os.path.join(config.save_dir, "data", "server.db")
+        # SAGE_DB_PATH 允许把 SQLite 库放到 FUSE bind mount 之外（例如 Docker 命名卷），
+        # 避免 Docker Desktop 的 bind mount 对 server.db 路径的陈旧句柄导致 “unable to open database file”。
+        # 未设置时保持原行为（saves/data/server.db），不改变本机/测试运行路径。
+        self.db_path = os.environ.get("SAGE_DB_PATH") or os.path.join(
+            config.save_dir, "data", "server.db"
+        )
         self.ensure_db_dir()
 
         # 创建SQLAlchemy引擎
