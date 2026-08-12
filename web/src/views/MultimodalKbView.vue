@@ -92,7 +92,7 @@
                     <template #cover>
                       <div class="img-wrapper" @click="previewSingleImage(img)">
                          <AuthenticatedImage
-                           :src="getImgUrl(img)"
+                           :src="getImgUrl(img, { thumb: true })"
                            :alt="img.summary || img.img_name || '知识库图片'"
                            :open-in-new-tab="false"
                          />
@@ -229,6 +229,7 @@
               <a-collapse
                 v-if="searchResults.length"
                 v-model:activeKey="expandedSearchResults"
+                ref="searchResultsContainer"
                 class="search-result-collapse"
               >
                 <a-collapse-panel
@@ -720,7 +721,12 @@
                                 <div v-if="!extractJobInfo.relevant_pages || !extractJobInfo.relevant_pages.length">无相关页面定位</div>
                                 <div v-for="p in extractJobInfo.relevant_pages" :key="p" style="margin-bottom: 20px; border: 1px solid var(--border); padding: 5px;">
                                    <div style="text-align: center; font-weight: bold; margin-bottom: 5px;">Page {{ p }}</div>
-                                   <img :src="getExtractPageUrl(p)" style="max-width: 100%; display: block; margin: 0 auto;" />
+                                   <AuthenticatedImage
+                                     class="extract-page-image"
+                                     :src="getExtractPageUrl(p)"
+                                     :alt="`第 ${p} 页截图`"
+                                     :open-in-new-tab="false"
+                                   />
                                 </div>
                              </div>
                           </div>
@@ -836,8 +842,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue';
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
 import { message } from 'ant-design-vue';
+import { useUserStore } from '@/stores/user';
 import { DeleteOutlined } from '@ant-design/icons-vue';
 import { marked } from 'marked'; // 需确保已安装 marked
 import * as api from '@/apis/multimodal';
@@ -847,8 +854,13 @@ import {
   getSearchResultSourceRows,
   getSearchResultType,
 } from '@/utils/multimodalSearch.mjs';
+import {
+  hydrateAuthenticatedImages,
+  rewriteProxiedImageSrcs,
+} from '@/utils/authenticated-markdown.mjs';
 
 // 全局状态
+const userStore = useUserStore();
 const activeTab = ref('manage');
 const kbList = ref([]);
 const loadingKbs = ref(false);
@@ -974,7 +986,8 @@ const loadImages = async ({ keepPage = false } = {}) => {
   if (!keepPage) imagePage.value = 1;
   const requestedKbId = currentKbId.value;
   const requestedPage = imagePage.value;
-  const requestedPageSize = imagePageSize.value;
+  // D1/D2：远端 pageSize 上限 100、下限 1，超限会被 422 拒绝，这里先钳制
+  const requestedPageSize = Math.min(Math.max(Number(imagePageSize.value) || 24, 1), 100);
   imageRequestController?.abort();
   const requestController = new AbortController();
   imageRequestController = requestController;
@@ -999,17 +1012,18 @@ const loadImages = async ({ keepPage = false } = {}) => {
 };
 
 const handleImagePageChange = (page, pageSize) => {
-  imagePageSize.value = Number(pageSize) || imagePageSize.value;
+  imagePageSize.value = Math.min(Math.max(Number(pageSize) || imagePageSize.value, 1), 100);
   imagePage.value = Number(page) || 1;
   loadImages({ keepPage: true });
 };
 
-// 构建图片 URL 的统一方法
-const getImgUrl = (img) => {
+// 构建图片 URL 的统一方法；列表用 320px 缩略图（thumb=1），点击放大用原图
+const getImgUrl = (img, { thumb = false } = {}) => {
   return api.getPdfImageUrl({
     kbId: currentKbId.value,
     fileId: img.fileId,
     imagePath: img.img_name || img.imagePath || img.path,
+    thumb: thumb ? 1 : undefined,
   });
 };
 const getImageKey = (img, idx) => {
@@ -1059,6 +1073,7 @@ const saveAllImageDescs = async () => {
 const singleImagePreviewVisible = ref(false);
 const singleImagePreviewUrl = ref('');
 const previewSingleImage = (img) => {
+  // 放大预览用原图（不带 thumb=1）
   singleImagePreviewUrl.value = getImgUrl(img);
   singleImagePreviewVisible.value = true;
 };
@@ -1305,15 +1320,32 @@ const renderMarkdown = (text, item) => {
     }
   );
   html = html.replace(/<img\b(?![^>]*\bloading=)/gi, '<img loading="lazy" decoding="async"');
-  return html;
+  // D2：把指向鉴权代理（/api/multimodal/**）的 <img src> 改写为 data-auth-src，
+  // 由 hydrateAuthenticatedImages 带令牌懒加载；原生 <img> 无法附加 Authorization。
+  return rewriteProxiedImageSrcs(html);
 };
 
 const handleSearchResultContentClick = (event) => {
   const image = event.target?.closest?.('img');
   if (!image) return;
-  singleImagePreviewUrl.value = image.currentSrc || image.src;
+  // 优先用原始代理 URL（模态框里的 AuthenticatedImage 会带令牌重新加载原图）
+  singleImagePreviewUrl.value = image.dataset?.authSrc || image.currentSrc || image.src;
   singleImagePreviewVisible.value = true;
 };
+
+// D2：搜索结果 v-html 内的鉴权图片懒加载（只在结果集变化时重新挂载；
+// 折叠面板展开由 hydrateAuthenticatedImages 内部的 IntersectionObserver 触发）
+const searchResultsContainer = ref(null);
+let stopSearchImageHydration = () => {};
+const hydrateSearchResultImages = async () => {
+  stopSearchImageHydration();
+  await nextTick();
+  const root = searchResultsContainer.value?.$el || searchResultsContainer.value;
+  if (!root || !root.querySelector) return;
+  stopSearchImageHydration = hydrateAuthenticatedImages(root, userStore.token);
+};
+
+watch(searchResults, hydrateSearchResultImages);
 
 watch(detailTab, (val) => {
   if (val === 'images' && currentKbId.value && !imageList.value.length && !imageLoading.value) {
@@ -1980,7 +2012,10 @@ onMounted(() => {
   loadKbList();
 });
 
-onBeforeUnmount(() => imageRequestController?.abort());
+onBeforeUnmount(() => {
+  stopSearchImageHydration();
+  imageRequestController?.abort();
+});
 </script>
 
 <style scoped>

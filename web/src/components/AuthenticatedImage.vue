@@ -20,7 +20,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useUserStore } from '@/stores/user'
-import { fetchAuthenticatedBlob } from '@/utils/authenticated-image.mjs'
+import { fetchAuthenticatedBlob, peekAuthenticatedBlob } from '@/utils/authenticated-image.mjs'
 import { observeUntilVisible } from '@/utils/lazy-image.mjs'
 
 const props = defineProps({
@@ -50,8 +50,15 @@ const loadImage = async () => {
   controller = requestController
   releaseObjectUrl()
   error.value = ''
-  loading.value = true
 
+  // 会话缓存命中：直接显示，不进入 loading 态（D2.6 缓存复用）
+  const cached = peekAuthenticatedBlob(props.src, userStore.token)
+  if (cached) {
+    if (controller === requestController) objectUrl.value = URL.createObjectURL(cached)
+    return
+  }
+
+  loading.value = true
   try {
     const blob = await fetchAuthenticatedBlob(props.src, userStore.token, fetch, requestController.signal)
     if (controller === requestController) objectUrl.value = URL.createObjectURL(blob)

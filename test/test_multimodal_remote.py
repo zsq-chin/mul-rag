@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from server.utils.multimodal_remote import (
+    MultimodalPaginationError,
     build_multimodal_remote_url,
     filter_multimodal_proxy_headers,
     format_multimodal_context,
@@ -79,22 +80,35 @@ class MultimodalRemoteTests(unittest.TestCase):
         self.assertEqual(result["contentType"], "table")
         self.assertIn("rowspan", result["text"])
 
-    def test_unpaged_image_catalog_is_sliced_on_the_server(self):
-        page = normalize_multimodal_image_page(
-            {"images": [{"name": f"image-{index}.png"} for index in range(5)]},
-            page=2,
-            page_size=2,
-        )
+    def test_unpaged_image_catalog_is_rejected_not_fake_paginated(self):
+        # D1：远端返回全量列表（无分页元数据）时，SAGE 必须报契约错误，
+        # 不得本地切片伪装成已分页。
+        with self.assertRaises(MultimodalPaginationError):
+            normalize_multimodal_image_page(
+                {"images": [{"name": f"image-{index}.png"} for index in range(5)]},
+                page=2,
+                page_size=2,
+            )
 
-        self.assertEqual([item["name"] for item in page["items"]], ["image-2.png", "image-3.png"])
-        self.assertEqual(page["total"], 5)
-        self.assertEqual(page["page"], 2)
-        self.assertEqual(page["pageSize"], 2)
+    def test_oversized_remote_page_is_rejected_not_trimmed(self):
+        # D1：单页条目数超过 pageSize 说明远端并未真正分页，SAGE 拒绝透传。
+        with self.assertRaises(MultimodalPaginationError):
+            normalize_multimodal_image_page(
+                {
+                    "items": [{"name": f"image-{index}.png"} for index in range(5)],
+                    "page": 2,
+                    "pageSize": 2,
+                    "total": 5,
+                },
+                page=2,
+                page_size=2,
+            )
 
-    def test_oversized_remote_page_is_still_limited_on_the_server(self):
+    def test_server_paginated_page_passes_through_unchanged(self):
+        # D1：远端已分页时 SAGE 原样透传当前页，不重切片。
         page = normalize_multimodal_image_page(
             {
-                "items": [{"name": f"image-{index}.png"} for index in range(5)],
+                "items": [{"name": f"image-{index}.png"} for index in range(2)],
                 "page": 2,
                 "pageSize": 2,
                 "total": 5,
@@ -102,9 +116,10 @@ class MultimodalRemoteTests(unittest.TestCase):
             page=2,
             page_size=2,
         )
-
-        self.assertEqual([item["name"] for item in page["items"]], ["image-2.png", "image-3.png"])
+        self.assertEqual([item["name"] for item in page["items"]], ["image-0.png", "image-1.png"])
         self.assertEqual(page["total"], 5)
+        self.assertEqual(page["page"], 2)
+        self.assertEqual(page["pageSize"], 2)
 
     def test_build_remote_url_joins_configured_base(self):
         url = build_multimodal_remote_url("pdf/images", "http://remote.example/api/v1/")

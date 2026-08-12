@@ -1,6 +1,6 @@
 import io
-from fastapi import FastAPI, UploadFile, File, Query, Body, Form
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi import FastAPI, UploadFile, File, Query, Body, Form, Request
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio, time, os, random, string, json, re
@@ -388,37 +388,23 @@ async def kb_files(kbId: str = Query(...)):
     return {"kbId": kb_id, "files": items}
 
 @app.get(f"{API_PREFIX}/kb/images", tags=["KB"])
-async def kb_images_all(kbId: str = Query(...)):
-    """获取知识库下所有文件的图片摘要列表"""
+async def kb_images_page(
+    kbId: str = Query(...),
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(24, ge=1, le=100),
+):
+    """获取知识库图片目录：服务端分页（数据源层切片，只返回当前页）。
+
+    阶段 D1：分页、稳定排序、轻量元数据都发生在数据源所在进程内；响应固定为
+    `items/page/pageSize/total`，pageSize 最大 100、默认 24。SAGE 侧不得再对
+    全量列表本地切片（“假分页”）。
+    """
+    from services.image_catalog import paginate_kb_images
+
     kb_id = (kbId or "").strip()
     if not kb_id:
-        return {"images": []}
-    
-    from services.pdf_service import get_image_summaries
-    
-    all_images = []
-    root = DATA_ROOT / kb_id / "files"
-    if root.exists():
-        for fdir in root.iterdir():
-            if fdir.is_dir():
-                file_id = fdir.name
-                # 为了前端显示文件名，尝试简单匹配
-                # 这里为了性能，就不去读 meta.json 了，直接看目录下有没有主文件
-                file_name = file_id
-                for pattern in ["*.pdf", "*.xlsx", "*.xls", "*.csv"]:
-                    matches = sorted(fdir.glob(pattern))
-                    if matches:
-                        file_name = matches[0].name
-                        break
-                
-                summaries = get_image_summaries(kb_id, file_id)
-                for item in summaries:
-                    # 注入文件信息
-                    item["fileId"] = file_id
-                    item["fileName"] = file_name
-                    all_images.append(item)
-    
-    return {"images": all_images}
+        return JSONResponse(err("PARAM_ERROR", "缺少知识库 ID"), status_code=400)
+    return paginate_kb_images(DATA_ROOT, kb_id, page=page, page_size=pageSize)
 
 @app.get(f"{API_PREFIX}/kb/file/dataframe", tags=["KB"])
 async def kb_file_dataframe(kbId: str = Query(...), fileId: str = Query(...)):
@@ -643,29 +629,39 @@ async def pdf_page(
 # ---------------- PDF: 图片文件 ----------------
 @app.get(f"{API_PREFIX}/pdf/images", tags=["PDF"])
 async def pdf_images(
+    request: Request,
     kbId: str = Query(...),
     fileId: str = Query(...),
-    imagePath: str = Query(...)
+    imagePath: str = Query(...),
+    thumb: int = Query(0, ge=0, le=1),
 ):
-    """获取PDF解析后的图片文件"""
-    # 移除对 current_pdf 的强校验
-    # if not current_pdf["fileId"] or current_pdf["fileId"] != fileId:
-    #     return JSONResponse(status_code=404, content=None)
+    """获取 PDF 解析后的图片文件；`thumb=1` 返回 320px 缓存缩略图。
 
-    # 构建图片文件的完整路径
-    from services.pdf_service import images_dir
-    image_file = images_dir(kbId, fileId) / imagePath
-    
-    if not image_file.exists():
+    阶段 D1/D2：
+    - 图片名 / kbId / fileId 在 image_catalog 内严格校验（拒绝穿越、绝对路径、
+      盘符、UNC、NUL、URL 编码分隔符），不向外部暴露远端文件系统路径；
+    - 缩略图按需生成并缓存到 `<file>/thumbs/`，源图更新后自动重新生成；
+    - ETag 基于被服务文件 stat 指纹，支持 If-None-Match → 304，合理 Cache-Control。
+    """
+    from services.image_catalog import make_image_etag, resolve_image_for_serve
+
+    kb_id = (kbId or "").strip()
+    file_id = (fileId or "").strip()
+    path, is_thumb = resolve_image_for_serve(
+        DATA_ROOT, kb_id, file_id, imagePath, thumb=bool(thumb)
+    )
+    if path is None:
         return JSONResponse(err("IMAGE_NOT_FOUND", "图片文件不存在"), status_code=404)
-    
-    # 检查文件是否在images目录内（安全考虑）
-    try:
-        image_file.resolve().relative_to(images_dir(kbId, fileId).resolve())
-    except ValueError:
-        return JSONResponse(err("INVALID_PATH", "无效的图片路径"), status_code=400)
-    
-    return FileResponse(str(image_file), media_type="image/png")
+
+    etag = make_image_etag(path, thumb=is_thumb)
+    cache_control = "private, max-age=3600"
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": cache_control})
+    return FileResponse(
+        str(path),
+        media_type="image/jpeg" if is_thumb else "image/png",
+        headers={"ETag": etag, "Cache-Control": cache_control},
+    )
 
 @app.get(f"{API_PREFIX}/pdf/images_list", tags=["PDF"])
 async def pdf_images_list(kbId: str = Query(...), fileId: str = Query(...)):

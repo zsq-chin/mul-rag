@@ -64,8 +64,6 @@ export const getKbFiles = (params) => ragRequest.get('/kb/files', { params })
 
 export const getKbImages = (params, signal) => ragRequest.get('/kb/images', { params, signal })
 
-export const getFileOriginal = (params) => ragRequest.get('/kb/file/original', { params })
-
 export const getFileOriginalUrl = (params) => buildMultimodalAssetUrl('/kb/file/original', params)
 
 export const getFileDataFrame = (params) => ragRequest.get('/kb/file/dataframe', { params })
@@ -77,8 +75,6 @@ export const deleteKbFile = (data) => ragRequest.post('/kb/file/delete', data)
 export const updateKbImage = (data) => ragRequest.post('/kb/image/update', data)
 
 export const updateKbImages = (data) => ragRequest.post('/kb/images/update', data)
-
-export const getFileManagerWells = (params = {}) => ragRequest.get('/file-manager/wells', { params })
 
 // ================= PDF / File =================
 export const uploadFile = (formData) => {
@@ -122,8 +118,6 @@ export const startExtraction = (formData) => {
 }
 
 export const getExtractionStatus = (params) => ragRequest.get('/extraction/status', { params })
-
-export const getExtractionContent = (params) => ragRequest.get('/extraction/content', { params })
 
 export const checkExtractionFilename = (params) => ragRequest.get('/extraction/check_filename', { params })
 
@@ -178,6 +172,3 @@ export const getStructuredDbSchema = (params) => ragRequest.get('/structured-db/
 export const getStructuredDbTable = (params) => ragRequest.get('/structured-db/table', { params })
 
 export const queryStructuredDb = (data) => ragRequest.post('/structured-db/query', data)
-
-// ================= Query / Chat =================
-export const unifiedQuery = (data) => ragRequest.post('/query', data)

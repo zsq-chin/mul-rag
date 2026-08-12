@@ -304,6 +304,77 @@ def normalize_multimodal_image_path(value: Any) -> str | None:
     return _normalize_image_path(value)
 
 
+_IDENTIFIER_PARAMS = {"kbId", "fileId", "imagePath", "image_path", "path"}
+
+
+def validate_proxy_identifier_params(params: list[tuple[str, str]]) -> None:
+    """代理查询参数中的图片标识符校验（D2.5）。
+
+    对 `kbId / fileId / imagePath / image_path / path` 类参数拒绝绝对路径、
+    目录穿越、URL、盘符、UNC 和 NUL；不暴露远端文件系统路径。非法值抛
+    ValueError，由路由层映射 400。
+    """
+    for key, raw_value in params:
+        if key not in _IDENTIFIER_PARAMS:
+            continue
+        text = str(raw_value or "").strip()
+        if not text or "\x00" in text:
+            raise ValueError(f"非法的 {key}")
+        decoded = unquote(text).replace("\\", "/")
+        if "\x00" in decoded:
+            raise ValueError(f"非法的 {key}")
+        if decoded.startswith("/") or decoded.startswith("//"):
+            raise ValueError(f"非法的 {key}")
+        if re.match(r"^[A-Za-z]:", decoded):
+            raise ValueError(f"非法的 {key}")
+        if decoded in (".", ".."):
+            raise ValueError(f"非法的 {key}")
+        if key == "imagePath" or key == "image_path":
+            # 图片名必须是安全的文件 basename（_normalize_image_path 已拒绝分隔符）
+            if _normalize_image_path(decoded) is None:
+                raise ValueError("图片路径无效")
+        elif "/" in decoded:
+            raise ValueError(f"非法的 {key}")
+
+
+def validate_multimodal_image_params(kb_id: Any, file_id: Any, image_path: Any) -> tuple[str, str, str]:
+    """严格校验聊天图片代理的三个标识符（D2.5）。
+
+    返回规范化后的 (kbId, fileId, imagePath)；任何一项非法抛 ValueError，
+    由路由层映射 400，绝不把远端文件系统路径回显给浏览器。
+    """
+    validate_proxy_identifier_params([("kbId", kb_id), ("fileId", file_id), ("imagePath", image_path)])
+    safe_image = _normalize_image_path(image_path)
+    if safe_image is None:
+        raise ValueError("图片路径无效")
+    return (
+        unquote(str(kb_id or "")).strip().replace("\\", "/"),
+        unquote(str(file_id or "")).strip().replace("\\", "/"),
+        safe_image,
+    )
+
+
+def is_image_content_type(content_type: str) -> bool:
+    """上游响应 Content-Type 是否为可接受的图片类型（D2.4）。"""
+    base = (content_type or "").split(";", 1)[0].strip().lower()
+    return base.startswith("image/") or base in ("application/octet-stream",)
+
+
+_IMAGE_PASSTHROUGH_HEADERS = {"etag", "cache-control", "accept-ranges", "content-range", "last-modified"}
+
+
+def filter_image_response_headers(headers: Any) -> dict[str, str]:
+    """图片响应只转发明确允许的头（ETag/Cache-Control/Range 相关）。
+
+    拒绝 Set-Cookie、Location、Content-Length（流式由 SAGE 自设）与其余头。
+    """
+    result: dict[str, str] = {}
+    for key, value in headers.items():
+        if key.lower() in _IMAGE_PASSTHROUGH_HEADERS:
+            result[key] = value
+    return result
+
+
 def _iter_image_candidates(value: Any, inherited_alt: str = ""):
     if isinstance(value, (list, tuple)):
         for item in value:
@@ -364,64 +435,51 @@ def _extract_images(
     return images
 
 
+IMAGE_PAGE_SIZE_DEFAULT = 24
+IMAGE_PAGE_SIZE_MAX = 100
+
+
 def normalize_multimodal_image_page(payload: Any, page: int = 1, page_size: int = 24) -> dict[str, Any]:
-    safe_page = max(1, int(page or 1))
-    safe_page_size = min(100, max(1, int(page_size or 24)))
+    """严格校验并透传远端服务端分页响应 `items/page/pageSize/total`（D1）。
 
-    containers = [payload]
+    契约（与远端 D1 实现 `mul_rag/backend/services/image_catalog.py` 一致）：
+    - 响应必须包含 items(list) 与分页元数据 total/page/pageSize；
+    - 单页条目数不得超过 pageSize（上限 100、默认 24）；
+    - 远端返回全量列表（无分页元数据）或单页条目超限时抛 MultimodalPaginationError，
+      路由层映射 502 —— 绝不本地切片伪装成已分页。
+
+    SAGE 只透传当前页，保证浏览器/网络不出现一次性全量目录传输。
+    """
+    container = payload
     if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
-        containers.append(payload["data"])
+        container = payload["data"]
+    if not isinstance(container, dict):
+        raise MultimodalPaginationError("远端 `/kb/images` 响应不是 JSON 对象")
 
-    items: list[Any] = []
-    metadata: dict[str, Any] = {}
-    for container in containers:
-        if isinstance(container, list):
-            items = container
-            break
-        if not isinstance(container, dict):
-            continue
-        for key in ("items", "images", "results", "data"):
-            value = container.get(key)
-            if isinstance(value, list):
-                items = value
-                metadata = container
-                break
-        if items or metadata:
-            break
+    items = container.get("items")
+    if not isinstance(items, list):
+        raise MultimodalPaginationError("远端 `/kb/images` 缺少 items 列表（未启用服务端分页）")
 
-    is_remote_page = bool(
-        metadata
-        and "total" in metadata
-        and any(key in metadata for key in ("page", "pageSize", "page_size"))
+    if "total" not in container or (
+        "page" not in container and "pageSize" not in container and "page_size" not in container
+    ):
+        raise MultimodalPaginationError("远端 `/kb/images` 缺少分页元数据（未启用服务端分页）")
+
+    total = max(0, int(container.get("total") or 0))
+    remote_page = max(1, int(container.get("page") or page or 1))
+    remote_page_size = min(
+        IMAGE_PAGE_SIZE_MAX,
+        max(
+            1,
+            int(container.get("pageSize") or container.get("page_size") or page_size or IMAGE_PAGE_SIZE_DEFAULT),
+        ),
     )
-    if is_remote_page:
-        total = max(0, int(metadata.get("total") or 0))
-        remote_page = max(1, int(metadata.get("page") or safe_page))
-        remote_page_size = min(
-            100,
-            max(1, int(metadata.get("pageSize") or metadata.get("page_size") or safe_page_size)),
-        )
-        if len(items) > remote_page_size:
-            if len(items) == total:
-                start = (remote_page - 1) * remote_page_size
-                items = items[start : start + remote_page_size]
-            else:
-                items = items[:remote_page_size]
-        return {
-            "items": items,
-            "page": remote_page,
-            "pageSize": remote_page_size,
-            "total": total,
-        }
 
-    total = len(items)
-    start = (safe_page - 1) * safe_page_size
-    return {
-        "items": items[start : start + safe_page_size],
-        "page": safe_page,
-        "pageSize": safe_page_size,
-        "total": total,
-    }
+    if len(items) > remote_page_size:
+        raise MultimodalPaginationError(
+            f"远端 `/kb/images` 单页返回 {len(items)} 条，超过 pageSize={remote_page_size}，未执行服务端分页"
+        )
+    return {"items": items, "page": remote_page, "pageSize": remote_page_size, "total": total}
 
 
 def normalize_multimodal_results(payload: Any, kb_id: str | None = None) -> list[dict[str, Any]]:
@@ -800,6 +858,7 @@ def _env_int(name: str, default: int) -> int:
 MAX_JSON_BODY_BYTES = _env_int("MULTIMODAL_JSON_BODY_MAX_BYTES", 1 * 1024 * 1024)
 MAX_JSON_RESPONSE_BYTES = _env_int("MULTIMODAL_JSON_RESPONSE_MAX_BYTES", 16 * 1024 * 1024)
 MAX_STREAM_BYTES = _env_int("MULTIMODAL_STREAM_RESPONSE_MAX_BYTES", 512 * 1024 * 1024)
+MAX_IMAGE_RESPONSE_BYTES = _env_int("MULTIMODAL_IMAGE_RESPONSE_MAX_BYTES", 20 * 1024 * 1024)
 MAX_UPLOAD_FILES = _env_int("MULTIMODAL_UPLOAD_MAX_FILES", 5)
 MAX_UPLOAD_FILE_BYTES = _env_int("MULTIMODAL_UPLOAD_MAX_FILE_BYTES", 50 * 1024 * 1024)
 MAX_UPLOAD_TOTAL_BYTES = _env_int("MULTIMODAL_UPLOAD_MAX_TOTAL_BYTES", 100 * 1024 * 1024)
@@ -861,6 +920,15 @@ class MultimodalUploadError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+
+
+class MultimodalPaginationError(Exception):
+    """远端 `/kb/images` 未提供真正的服务端分页（阶段 D1）。
+
+    当远端返回全量列表（无分页元数据）或单页条目数超过 pageSize 时抛出，路由层
+    映射为 502，前端显示可恢复的错误态。禁止在本机对全量列表本地切片伪装成已
+    分页（“假分页”）。
+    """
 
 
 @dataclass(frozen=True)

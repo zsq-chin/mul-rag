@@ -29,6 +29,7 @@ from server.utils.multimodal_remote import (
     PERMISSION_READ,
     RESPONSE_STREAM,
     MultimodalConfigError,
+    MultimodalPaginationError,
     MultimodalUploadError,
     accumulate_bounded_bytes,
     build_multimodal_remote_url,
@@ -41,6 +42,7 @@ from server.utils.multimodal_remote import (
     new_multimodal_trace_id,
     normalize_multimodal_image_page,
     route_spec_for,
+    validate_proxy_identifier_params,
     validate_stream_content_type,
     validate_upload_metadata,
     whitelisted_proxy_routes,
@@ -85,6 +87,11 @@ def _raise_proxy_error(exc: BaseException, spec: Any, trace_id: str, t0: float) 
         raise exc
     if isinstance(exc, MultimodalUploadError):
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    if isinstance(exc, MultimodalPaginationError):
+        logger.error(
+            format_redacted_upstream_error(trace_id, spec.path, 502, _elapsed_ms(t0), "PaginationContract")
+        )
+        raise HTTPException(status_code=502, detail=f"{exc}（trace={trace_id[:8]}）") from exc
     if isinstance(exc, httpx.TimeoutException):
         logger.error(format_redacted_upstream_error(trace_id, spec.path, None, _elapsed_ms(t0), type(exc).__name__))
         raise HTTPException(status_code=504, detail=f"多模态远端连接/读取超时（trace={trace_id[:8]}）") from exc
@@ -122,6 +129,10 @@ async def _build_upstream_request(
     """
     request_headers = filter_multimodal_proxy_headers(dict(request.headers))
     params = list(request.query_params.multi_items())
+    try:
+        validate_proxy_identifier_params(params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if spec.body == BODY_MULTIPART:
         content_length = request.headers.get("content-length")

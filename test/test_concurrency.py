@@ -84,16 +84,11 @@ class StreamingGateTests(unittest.IsolatedAsyncioTestCase):
             patch.object(chat_router, "upstream_proxy_gate", gate),
             patch.object(chat_router, "get_multimodal_client", return_value=FakeClient()),
             patch.object(chat_router, "get_multimodal_api_base", return_value="http://upstream"),
-            patch.object(
-                chat_router,
-                "normalize_multimodal_image_path",
-                return_value="page/image.png",
-            ),
         ):
             proxy_response = await chat_router.get_multimodal_image(
                 kbId="kb",
                 fileId="file",
-                imagePath="page/image.png",
+                imagePath="image.png",
                 current_user=object(),
             )
 
@@ -136,16 +131,11 @@ class StreamingGateTests(unittest.IsolatedAsyncioTestCase):
             patch.object(chat_router, "upstream_proxy_gate", gate),
             patch.object(chat_router, "get_multimodal_client", return_value=FakeClient()),
             patch.object(chat_router, "get_multimodal_api_base", return_value="http://upstream"),
-            patch.object(
-                chat_router,
-                "normalize_multimodal_image_path",
-                return_value="page/image.png",
-            ),
         ):
             proxy_response = await chat_router.get_multimodal_image(
                 kbId="kb",
                 fileId="file",
-                imagePath="page/image.png",
+                imagePath="image.png",
                 current_user=object(),
             )
             iterator = proxy_response.body_iterator
@@ -263,11 +253,6 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(chat_router, "upstream_proxy_gate", gate),
             patch.object(chat_router, "get_multimodal_client", return_value=FakeClient()),
             patch.object(chat_router, "get_multimodal_api_base", return_value="http://upstream"),
-            patch.object(
-                chat_router,
-                "normalize_multimodal_image_path",
-                return_value="page/image.png",
-            ),
         ):
             with self.assertRaises(HTTPException) as ctx:
                 await chat_router.get_multimodal_image(
@@ -296,11 +281,6 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(chat_router, "upstream_proxy_gate", gate),
             patch.object(chat_router, "get_multimodal_client", return_value=FakeClient()),
             patch.object(chat_router, "get_multimodal_api_base", return_value="http://upstream"),
-            patch.object(
-                chat_router,
-                "normalize_multimodal_image_path",
-                return_value="page/image.png",
-            ),
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await chat_router.get_multimodal_image(

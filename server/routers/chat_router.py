@@ -8,7 +8,7 @@ import traceback
 import uuid
 from datetime import datetime # [新增] 导入 datetime
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -33,12 +33,18 @@ from server.models.user_model import User
 from server.models.thread_model import Thread
 from server.models.chat_model import ChatRecord, ExamPapersRecord, GuideRecord, ItemRecord, WriterRecord
 from server.utils.multimodal_remote import (
+    MAX_IMAGE_RESPONSE_BYTES,
+    MAX_JSON_RESPONSE_BYTES,
+    accumulate_bounded_bytes,
     build_service_auth_headers,
+    filter_image_response_headers,
     format_redacted_upstream_error,
     get_multimodal_api_base,
+    is_image_content_type,
+    map_upstream_proxy_status,
     new_multimodal_trace_id,
-    normalize_multimodal_image_path,
     normalize_multimodal_kbs,
+    validate_multimodal_image_params,
 )
 from server.utils.stream_sanitizer import (
     ChatStreamAssembler,
@@ -79,25 +85,36 @@ async def get_multimodal_image(
         kbId: str = Query(...),
         fileId: str = Query(...),
         imagePath: str = Query(...),
+        thumb: int = Query(0, ge=0, le=1),
+        request: Request = None,
         current_user: User = Depends(get_required_user),
         ):
     base_url = get_multimodal_api_base()
     if not base_url:
         raise HTTPException(status_code=503, detail="多模态知识库未配置")
 
-    safe_image_path = normalize_multimodal_image_path(imagePath)
-    if not safe_image_path:
-        raise HTTPException(status_code=400, detail="图片路径无效")
+    # D2.5：校验 kbId/fileId/imagePath，拒绝绝对路径、穿越、URL、盘符、UNC、NUL
+    try:
+        safe_kb, safe_file, safe_image_path = validate_multimodal_image_params(kbId, fileId, imagePath)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     trace_id = new_multimodal_trace_id()
     headers = build_service_auth_headers(trace_id)
+    # D2.6：条件请求 / Range 透传（远端支持时）
+    if request is not None:
+        if request.headers.get("if-none-match"):
+            headers["if-none-match"] = request.headers["if-none-match"]
+        if request.headers.get("range"):
+            headers["range"] = request.headers["range"]
+
     await upstream_proxy_gate.__aenter__()
     try:
         client = get_multimodal_client()
         upstream_request = client.build_request(
             "GET",
             f"{base_url}/pdf/images",
-            params={"kbId": kbId, "fileId": fileId, "imagePath": safe_image_path},
+            params={"kbId": safe_kb, "fileId": safe_file, "imagePath": safe_image_path, "thumb": thumb},
             headers=headers,
         )
         resp = await client.send(upstream_request, stream=True)
@@ -109,10 +126,61 @@ async def get_multimodal_image(
         logger.error(format_redacted_upstream_error(trace_id, "pdf/images", None, 0.0, type(e).__name__))
         raise HTTPException(status_code=502, detail=f"多模态图片加载失败（trace={trace_id[:8]}）") from e
 
+    status = resp.status_code
+    if status == 304:
+        # 远端命中条件请求：透传 304，不流式返回
+        headers_out = filter_image_response_headers(resp.headers)
+        await resp.aclose()
+        await upstream_proxy_gate.__aexit__(None, None, None)
+        return Response(status_code=304, headers=headers_out)
+
+    # D2.4：开始流式前先检查上游状态码，不得把 JSON 错误当图片返回
+    if resp.is_redirect or status >= 400:
+        if resp.is_redirect:
+            await resp.aclose()
+            await upstream_proxy_gate.__aexit__(None, None, None)
+            logger.error(format_redacted_upstream_error(trace_id, "pdf/images", status, 0.0, "Redirect"))
+            raise HTTPException(status_code=502, detail=f"多模态远端跳转已被拒绝（trace={trace_id[:8]}）")
+        await accumulate_bounded_bytes(resp.aiter_bytes(), MAX_JSON_RESPONSE_BYTES)  # 有界读掉错误体，仅日志
+        mapped_status, mapped_message = map_upstream_proxy_status(status)
+        logger.error(format_redacted_upstream_error(trace_id, "pdf/images", status, 0.0, "HTTPError"))
+        await resp.aclose()
+        await upstream_proxy_gate.__aexit__(None, None, None)
+        raise HTTPException(status_code=mapped_status, detail=f"{mapped_message}（trace={trace_id[:8]}）")
+
+    # D2.4：Content-Type 必须是图片，否则拒绝（如上游把 JSON 错误当 PNG 返回）
+    content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip()
+    if not is_image_content_type(content_type):
+        logger.error(format_redacted_upstream_error(trace_id, "pdf/images", status, 0.0, "BadImageContentType"))
+        await resp.aclose()
+        await upstream_proxy_gate.__aexit__(None, None, None)
+        raise HTTPException(status_code=502, detail=f"多模态远端返回非图片 Content-Type（trace={trace_id[:8]}）")
+
+    # D2.6：单张图片最大响应体积限制
+    declared_length = None
+    raw_length = resp.headers.get("content-length")
+    if raw_length:
+        try:
+            declared_length = int(raw_length)
+        except (TypeError, ValueError):
+            declared_length = None
+    if declared_length is not None and declared_length > MAX_IMAGE_RESPONSE_BYTES:
+        logger.error(format_redacted_upstream_error(trace_id, "pdf/images", status, 0.0, "ResponseTooLarge"))
+        await resp.aclose()
+        await upstream_proxy_gate.__aexit__(None, None, None)
+        raise HTTPException(status_code=502, detail=f"多模态图片超过体积限制（trace={trace_id[:8]}）")
+
     async def _stream():
+        total = 0
         try:
             async for chunk in resp.aiter_bytes(chunk_size=1024 * 64):
+                total += len(chunk)
+                if total > MAX_IMAGE_RESPONSE_BYTES:
+                    return
                 yield chunk
+        except (httpx.HTTPError, asyncio.CancelledError):
+            # 客户端断开或上游读取失败：停止，不把断流当 500
+            return
         finally:
             try:
                 await resp.aclose()
@@ -121,9 +189,9 @@ async def get_multimodal_image(
 
     return StreamingResponse(
         _stream(),
-        status_code=resp.status_code,
-        media_type=resp.headers.get("content-type", "image/png"),
-        headers={"Cache-Control": resp.headers.get("cache-control", "private, max-age=3600")},
+        status_code=status,
+        media_type=content_type or "application/octet-stream",
+        headers=filter_image_response_headers(resp.headers),
     )
 
 

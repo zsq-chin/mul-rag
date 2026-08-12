@@ -23,9 +23,23 @@ ROOT = Path(__file__).resolve().parents[1]
 # Stage B1–B3、D 明确要求修改这些文件（SSRF 消除、服务认证、白名单代理、分页透传），
 # 因此它们已不属于“禁止修改”范围。文档中 verbatim 的约束是 mul_rag/** 保持零差异，
 # 这里只保留该范围。
+#
+# D1 授权覆盖：文档 §5 D1.5 “若远端现有 `/kb/images` 不支持数据源分页，这项必须修改
+# 远端后端，不能只在 SAGE 中‘假分页’”，因此 mul_rag 的以下远端改动是文档明确授权的
+# 唯一例外（白名单）——除此之外 mul_rag/** 仍必须保持零差异。白名单逐文件核对过，
+# 改动内容见 stage D 的 commit 与报告：
+#   mul_rag/backend/app.py                        —— /kb/images 改为数据源层分页；
+#                                                     /pdf/images 增加 thumb/ETag/304/严格路径校验
+#   mul_rag/backend/services/image_catalog.py（新增）—— 分页/缩略图/路径校验的实现
 FORBIDDEN_PATHS = [
     "mul_rag",
 ]
+
+# D1 文档授权的 mul_rag 远端改动白名单（git status 前三字符状态标记后的路径）。
+D1_AUTHORIZED_MUL_RAG_CHANGES = {
+    "mul_rag/backend/app.py",
+    "mul_rag/backend/services/image_catalog.py",
+}
 
 # 本机功能模块扫面范围（排除禁止路径本身）
 SCAN_DIRS = [
@@ -71,21 +85,33 @@ def _require_git(testcase):
         testcase.skipTest("仓库缺少 .git 元数据（如源码压缩包环境），跳过 git 守卫")
 
 
+def _unauthorized_mul_rag_changes():
+    """返回工作区中 mul_rag 下、不属于 D1 授权白名单的改动行（status 或 diff）。"""
+    lines = []
+    status = _git(["status", "--short", "--", *FORBIDDEN_PATHS])
+    for line in status.stdout.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:].strip()
+        if path not in D1_AUTHORIZED_MUL_RAG_CHANGES:
+            lines.append(line)
+    diff = _git(["diff", "--name-only", "--", *FORBIDDEN_PATHS])
+    for path in diff.stdout.splitlines():
+        path = path.strip()
+        if path and path not in D1_AUTHORIZED_MUL_RAG_CHANGES:
+            lines.append(f"diff {path}")
+    return lines
+
+
 class LocalScopeGuardTests(unittest.TestCase):
     def test_forbidden_paths_have_zero_diff(self):
-        """禁止修改路径在 HEAD 与工作区之间不得有差异。"""
+        """禁止修改路径在 HEAD 与工作区之间不得有差异（D1 授权白名单除外）。"""
         _require_git(self)
-        status = _git(["status", "--short", "--", *FORBIDDEN_PATHS])
+        changes = _unauthorized_mul_rag_changes()
         self.assertEqual(
-            status.stdout.strip(),
-            "",
-            f"禁止修改的路径在工作区发生变化:\n{status.stdout}",
-        )
-        diff = _git(["diff", "--", *FORBIDDEN_PATHS])
-        self.assertEqual(
-            diff.stdout.strip(),
-            "",
-            f"禁止修改的路径存在未提交差异:\n{diff.stdout}",
+            changes,
+            [],
+            "禁止修改的路径在工作区发生变化（D1 授权白名单之外）:\n" + "\n".join(changes),
         )
 
     def test_forbidden_paths_match_head_content(self):
