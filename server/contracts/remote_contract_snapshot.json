@@ -1,0 +1,68 @@
+{
+  "schema": "sage-remote-multimodal-contract/v1",
+  "frozen_at": "2026-08-12",
+  "remote": {
+    "openapi_md5": "5397c63053743950c0e9ccbc3d3951f0",
+    "openapi_version": "1.0.0",
+    "title": "多模态RAG系统API",
+    "paths_count": 55,
+    "health_endpoint": "/api/v1/health"
+  },
+  "target_kb": {
+    "kbId": "钻井设计资料",
+    "kbName": "钻井设计资料",
+    "vectorStoreType": "faiss",
+    "embedModel": "bge-m3:latest",
+    "fileCount": 22
+  },
+  "endpoints": {
+    "health": {
+      "method": "GET",
+      "path": "/api/v1/health",
+      "response_top_keys": ["ok", "version"]
+    },
+    "kb_list": {
+      "method": "GET",
+      "path": "/api/v1/kb/list",
+      "response_top_keys": ["kbs"],
+      "item_required_keys": ["kbId"],
+      "item_keys": ["kbId", "kbName", "vectorStoreType", "embedModel", "fileCount", "createdAt"]
+    },
+    "index_search": {
+      "method": "POST",
+      "path": "/api/v1/index/search",
+      "request_required": ["kbId", "query"],
+      "request_optional": ["fileId", "k"],
+      "request_k_default": 5,
+      "response_top_keys": ["ok", "results"],
+      "result_keys": ["id", "score", "entity_key", "source", "chunk_text"]
+    },
+    "kb_images": {
+      "method": "GET",
+      "path": "/api/v1/kb/images",
+      "query": [
+        {"kbId": "required"},
+        {"page": "optional, >=1"},
+        {"pageSize": "optional, 1..100, default 24"}
+      ],
+      "response_top_keys": ["items", "images", "page", "pageSize", "total"],
+      "item_keys": ["img_name", "summary", "page_num", "source_page_num", "original_img_name", "fileId", "fileName"]
+    },
+    "pdf_images": {
+      "method": "GET",
+      "path": "/api/v1/pdf/images",
+      "query": ["kbId", "fileId", "imagePath"]
+    },
+    "kb_files": {
+      "method": "GET",
+      "path": "/api/v1/kb/files",
+      "query": ["kbId"]
+    }
+  },
+  "notes": [
+    "远端 /api/v1/kb/images 为真实服务端分页（items/page/pageSize/total），本机不再切片全量。",
+    "远端 /api/v1/pdf/images 返回原始图片字节（Content-Type image/png，带 ETag）。",
+    "远端 /api/v1/index/search 的 source 字段为 JSON 字符串，含 kb_id/page/type/image_path/caption。",
+    "target_kb.fileCount 为 2026-08-12 实测值，仅用于契约校验参考，不作为强断言。"
+  ]
+}
