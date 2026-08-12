@@ -1,0 +1,36 @@
+# systemd 单元模板：远端多模态 RAG 后端守护（I3.4 / I3.6）
+#
+# 部署到远端多模态宿主：
+#   sudo cp multimodal-rag.service /etc/systemd/system/
+#   sudo cp start_remote_multimodal.sh /opt/mul_rag/start.sh        # 按实际路径调整
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now multimodal-rag
+#
+# 本模板不含任何真实秘密；运行变量统一从 /etc/multimodal-rag.env 注入
+# （模板见 multimodal-rag.env.example）。请不要把 Token/密码写进本文件。
+[Unit]
+Description=Multimodal RAG backend (SAGE remote dependency)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 固定工作目录：必须在后端代码所在目录，保证相对路径（knowledge_base 等）正确
+WorkingDirectory=/opt/mul_rag/backend
+# 启动变量只来自环境文件，不硬编码在单元里
+EnvironmentFile=/etc/multimodal-rag.env
+# 用启动脚本激活 Conda 环境并 exec uvicorn（避免 shell 残留进程）
+ExecStart=/opt/mul_rag/start.sh
+Restart=always
+RestartSec=5
+# Uvicorn 收到 SIGTERM 后优雅停掉在途请求；留足时间再强杀
+TimeoutStopSec=60
+KillSignal=SIGTERM
+# 资源上限（按实际 GPU 主机调整）
+MemoryMax=48G
+TasksMax=4096
+# 只读根文件系统外的持久化目录（I3.5）
+ReadWritePaths=/opt/mul_rag/backend/knowledge_base /opt/mul_rag/backend/data /opt/mul_rag/backend/logs /opt/mul_rag/backend/tmp
+
+[Install]
+WantedBy=multi-user.target

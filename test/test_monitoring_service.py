@@ -4,7 +4,8 @@
 - 依赖成功 / 超时 / 拒绝连接 / GPU 不存在四类场景均返回结构化状态。
 - 每个检查项独立超时；单个依赖失败不能拖垮整个接口。
 - GPU 不存在时返回 unavailable，不产生 500。
-- 不检查远程多模态知识库。
+- I3.3：远端多模态依赖单独上报 healthy/degraded/down/unavailable，
+  不计入本地聚合、不拖垮普通聊天流量。
 路由层只做源码断言（monitoring_router 导入 src，禁止导入）。
 """
 
@@ -62,6 +63,31 @@ def _timeout_probe(*args, **kwargs):
 
 def _refused_probe(*args, **kwargs):
     raise ConnectionRefusedError("connection refused")
+
+
+# 可解析出远端多模态 Base URL 的最小环境（配合注入 probe，不发起真实网络请求）。
+_MM_BASE_ENV = {
+    "MULTIMODAL_ENABLED": "true",
+    "MULTIMODAL_MODE": "remote",
+    "MULTIMODAL_KB_API_BASE": "https://mm.example.com/api/v1",
+}
+
+
+# ---- I3.3 远端多模态探针（可注入）----
+def _mm_healthy_probe(*args, **kwargs):
+    return (True, 200, {"ok": True})
+
+
+def _mm_degraded_http_probe(*args, **kwargs):
+    return (True, 502, {})
+
+
+def _mm_degraded_payload_probe(*args, **kwargs):
+    return (True, 200, {"ok": False})
+
+
+def _mm_down_probe(*args, **kwargs):
+    raise ConnectionError("connection refused")
 
 
 class SqliteCheckTests(unittest.TestCase):
@@ -242,30 +268,38 @@ class AggregateTests(unittest.TestCase):
             self.assertEqual(set(res["checks"]), {"api", "sqlite", "disk", "backup_dir"})
 
     def test_dependencies_all_ok_with_probes(self):
-        with _temp_env() as env:
+        with _temp_env() as env, patch.dict(os.environ, _MM_BASE_ENV, clear=True):
             res = ms.dependencies(
-                env["db"], env["ctx"], milvus_probe=_ok_probe, neo4j_probe=_ok_probe
+                env["db"], env["ctx"],
+                milvus_probe=_ok_probe, neo4j_probe=_ok_probe, multimodal_probe=_mm_healthy_probe,
             )
             self.assertEqual(res["status"], "ok")
             self.assertEqual(res["dependencies"]["milvus"]["status"], "ok")
             self.assertEqual(res["dependencies"]["neo4j"]["status"], "ok")
+            self.assertEqual(res["dependencies"]["multimodal"]["status"], "healthy")
 
     def test_single_failure_degrades_without_breaking_others(self):
-        with _temp_env() as env:
+        with _temp_env() as env, patch.dict(os.environ, _MM_BASE_ENV, clear=True):
             no_gpu = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="No devices")
             with patch.object(ms.subprocess, "run", return_value=no_gpu):
                 res = ms.dependencies(
-                    env["db"], env["ctx"], milvus_probe=_refused_probe, neo4j_probe=_ok_probe
+                    env["db"], env["ctx"],
+                    milvus_probe=_refused_probe, neo4j_probe=_ok_probe, multimodal_probe=_mm_healthy_probe,
                 )
             self.assertEqual(res["status"], "degraded")
             self.assertEqual(res["dependencies"]["milvus"]["status"], "failed")
             self.assertEqual(res["dependencies"]["neo4j"]["status"], "ok")
             self.assertEqual(res["dependencies"]["gpu"]["status"], "unavailable")  # GPU 不存在不算 500
+            self.assertEqual(res["dependencies"]["multimodal"]["status"], "healthy")
 
-    def test_dependencies_do_not_check_remote_multimodal(self):
-        with _temp_env() as env:
-            res = ms.dependencies(env["db"], env["ctx"])
-        self.assertNotIn("multimodal", res["dependencies"])
+    def test_dependencies_reports_multimodal_when_not_configured(self):
+        """I3.3：未配置远端多模态时上报 unavailable，不发网络请求、不计入本地聚合。"""
+        with _temp_env() as env, patch.dict(os.environ, {}, clear=True):
+            res = ms.dependencies(
+                env["db"], env["ctx"], milvus_probe=_ok_probe, neo4j_probe=_ok_probe
+            )
+        self.assertEqual(res["dependencies"]["multimodal"]["status"], "unavailable")
+        self.assertEqual(res["status"], "ok")  # 远端未启用不降级本地状态
 
     def test_metrics_shape(self):
         with _temp_env() as env:
@@ -273,6 +307,47 @@ class AggregateTests(unittest.TestCase):
             self.assertIn("gpu", res["metrics"])
             self.assertIn("last_backup", res["metrics"])
             self.assertIn("last_alert", res["metrics"])
+
+
+class MultimodalCheckTests(unittest.TestCase):
+    """I3.3 远端多模态依赖状态：healthy / degraded / down / unavailable。"""
+
+    def test_unavailable_when_not_configured(self):
+        with patch.dict(os.environ, {}, clear=True):
+            res = ms.check_multimodal()
+        self.assertEqual(res["status"], "unavailable")
+
+    def test_unavailable_when_explicitly_disabled(self):
+        with patch.dict(os.environ, {"MULTIMODAL_ENABLED": "false"}, clear=True):
+            res = ms.check_multimodal()
+        self.assertEqual(res["status"], "unavailable")
+
+    def test_healthy_when_probe_ok(self):
+        res = ms.check_multimodal(base_url="https://mm.example.com", probe=_mm_healthy_probe)
+        self.assertEqual(res["status"], "healthy")
+
+    def test_degraded_on_http_error(self):
+        res = ms.check_multimodal(base_url="https://mm.example.com", probe=_mm_degraded_http_probe)
+        self.assertEqual(res["status"], "degraded")
+        self.assertIn("HTTP 502", res["detail"])
+
+    def test_degraded_when_health_not_ok(self):
+        res = ms.check_multimodal(base_url="https://mm.example.com", probe=_mm_degraded_payload_probe)
+        self.assertEqual(res["status"], "degraded")
+
+    def test_down_on_connection_error(self):
+        res = ms.check_multimodal(base_url="https://mm.example.com", probe=_mm_down_probe)
+        self.assertEqual(res["status"], "down")
+
+    def test_down_does_not_flip_local_aggregate(self):
+        """远端 down 只影响本项，本地聚合保持 ok（I3.3 不使聊天退出流量）。"""
+        with _temp_env() as env, patch.dict(os.environ, _MM_BASE_ENV, clear=True):
+            res = ms.dependencies(
+                env["db"], env["ctx"],
+                milvus_probe=_ok_probe, neo4j_probe=_ok_probe, multimodal_probe=_mm_down_probe,
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["dependencies"]["multimodal"]["status"], "down")
 
 
 class MonitoringRouterSourceTests(unittest.TestCase):

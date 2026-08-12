@@ -163,6 +163,70 @@ class ComposeConfigMultimodalTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, "缺 MULTIMODAL_KB_API_BASE 时生产配置不应渲染成功")
         self.assertIn("MULTIMODAL_KB_API_BASE", r.stderr)
 
+    def test_prod_api_daemon_no_reload_with_grace_logrotate_limits(self):
+        """I3.1/I3.2：生产 API 无 reload；健康检查/停止宽限/日志轮转/资源限制/重启策略齐备。"""
+        api = self.prod_out.split("  api:\n", 1)[1].split("\n  web:", 1)[0]
+        self.assertNotIn("--reload", api, "生产 API 不得使用 --reload")
+        self.assertIn("--workers", api)
+        self.assertIn("stop_grace_period: 30s", api)
+        self.assertIn("max-size: 10m", api)
+        self.assertIn('max-file: "3"', api)
+        self.assertIn("restart: always", api)
+        self.assertIn('memory: "42949672960"', api)  # 40g 资源上限
+        self.assertIn("healthcheck:", api)
+
+    def test_prod_web_production_build_no_dev_server(self):
+        """I3.1：Web 使用生产构建，不跑 vite dev server。"""
+        self.assertIn("target: production", self.prod_out)
+        self.assertIn("NODE_ENV: production", self.prod_out)
+        self.assertNotIn("pnpm run server", self.prod_out)
+
+
+class RemoteDaemonTemplateTests(unittest.TestCase):
+    """I3.4/I3.6：远端多模态后端守护模板（systemd + 启动脚本 + README）。"""
+
+    def setUp(self):
+        deploy = ROOT / "deploy" / "remote-multimodal"
+        self.unit = (deploy / "multimodal-rag.service").read_text(encoding="utf-8")
+        self.launcher = (deploy / "start_remote_multimodal.sh").read_text(encoding="utf-8")
+        self.readme = (deploy / "README.md").read_text(encoding="utf-8")
+
+    def test_launcher_binds_8002_without_reload_single_worker(self):
+        self.assertIn("--workers 1", self.launcher)
+        self.assertIn('BIND="${MULTIMODAL_BIND:-0.0.0.0}"', self.launcher)
+        self.assertIn('PORT="${MULTIMODAL_PORT:-8002}"', self.launcher)
+        exec_line = next(
+            ln for ln in self.launcher.splitlines() if ln.strip().startswith("exec uvicorn")
+        )
+        self.assertNotIn("--reload", exec_line)
+
+    def test_launcher_activates_conda_env_and_execs(self):
+        self.assertIn("conda activate", self.launcher)
+        self.assertIn("exec uvicorn", self.launcher)
+
+    def test_systemd_unit_daemon_guarantees(self):
+        self.assertIn("WorkingDirectory=", self.unit)
+        self.assertIn("Restart=always", self.unit)
+        self.assertIn("TimeoutStopSec=60", self.unit)
+        self.assertIn("EnvironmentFile=", self.unit)
+        self.assertIn("knowledge_base", self.unit)
+        self.assertIn("RestartSec=5", self.unit)
+
+    def test_no_real_secrets_in_templates(self):
+        # 模板只允许占位符/文档说明；绝不出现真实私网 IP 或已填写的秘密值
+        for text in (self.unit, self.launcher, self.readme):
+            self.assertNotIn("10.16.33.2", text)
+        # 启动脚本/单元不得出现已填写的 Token/密码；变量名说明（占位符）允许出现在 README
+        self.assertNotIn("password=", self.launcher.lower())
+        self.assertNotIn("MULTIMODAL_SERVICE_TOKEN=Bearer", self.unit + self.launcher + self.readme)
+        self.assertNotIn("sk-", self.unit + self.launcher + self.readme)
+
+    def test_readme_covers_persistence_backup_recovery(self):
+        self.assertIn("knowledge_base", self.readme)
+        self.assertIn("恢复演练", self.readme)
+        self.assertIn("备份", self.readme)
+        self.assertIn("healthy/degraded/down", self.readme)
+
 
 class DockerVolumePersistenceTest(unittest.TestCase):
     """I2.3 实测：重建容器 + 升级镜像后命名卷内 SQLite 数据仍在。

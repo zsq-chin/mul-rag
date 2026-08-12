@@ -7,10 +7,13 @@
 - 每个检查项有独立超时；Milvus / Neo4j 采用惰性导入客户端库 + 可注入
   probe 函数，测试可注入伪 probe 覆盖“成功 / 超时 / 拒绝连接 / 不可用”四类场景。
 - GPU 不存在（无 NVIDIA 驱动或 nvidia-smi 不可用）时返回 `unavailable`，绝不抛 500。
-- 不检查远程多模态知识库，远程离线不视为本机系统故障。
+- 远端多模态单独上报（I3.3）：`healthy` / `degraded` / `down` / `unavailable`（未配置）。
+  远端离线只影响本项状态，绝不进入本地聚合、绝不拖垮普通聊天流量。
 
-状态值约定：`ok` / `failed` / `timeout` / `unavailable`。
-聚合状态：全部 `ok` 时为 `ok`，否则为 `degraded`（接口仍返回 200）。
+状态值约定（本地项）：`ok` / `failed` / `timeout` / `unavailable`；
+远端多模态项：`healthy` / `degraded` / `down` / `unavailable`。
+聚合状态：本地项全部 `ok` 时为 `ok`，否则为 `degraded`（接口仍返回 200）。
+远端多模态状态不计入本地聚合。
 """
 
 import os
@@ -186,6 +189,63 @@ def check_neo4j(uri, username, password, timeout=3.0, probe=None):
         return {"status": status, "detail": str(exc)[:200]}
 
 
+def _default_multimodal_probe(base_url, timeout=5.0):
+    """远端多模态 /health 探针：真实 I/O 超时（I3.3）。
+
+    返回 (reachable, status_code, payload)；连接失败/超时抛异常（由调用方归为 down）。
+    惰性导入 requests，避免监控模块顶层依赖网络库。
+    """
+    import requests
+
+    url = f"{str(base_url).rstrip('/')}/health"
+    response = requests.get(url, timeout=timeout)
+    payload = {}
+    if "application/json" in response.headers.get("content-type", ""):
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+    return True, response.status_code, payload
+
+
+def check_multimodal(timeout=5.0, probe=None, base_url=None):
+    """远端多模态依赖状态（I3.3）。
+
+    - 未配置目标（MULTIMODAL_ENABLED=false 或未注入 Base URL）→ `unavailable`，
+      不发起网络请求，也不视为本机故障；
+    - 可达且 /health 返回 ok:true → `healthy`；
+    - 可达但 HTTP >= 400 或 /health 未返回 ok → `degraded`；
+    - 连接拒绝 / 超时 / 异常 → `down`。
+
+    远端故障只影响本项状态，绝不使普通聊天退出流量。
+    probe 可注入：probe(base_url, timeout) -> (reachable, status_code, payload)。
+    """
+    if base_url is None:
+        try:
+            from server.utils import multimodal_remote
+
+            base_url = multimodal_remote.get_multimodal_api_base()
+        except Exception:  # noqa: BLE001 —— 配置非法按未启用处理
+            base_url = None
+    if not base_url:
+        return {"status": "unavailable", "detail": "未配置远端多模态 Base URL（多模态未启用）"}
+
+    probe = probe or _default_multimodal_probe
+    try:
+        reachable, status_code, payload = probe(base_url, timeout)
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "down", "detail": str(exc)[:200]}
+
+    if not reachable:
+        return {"status": "down", "detail": "远端多模态不可达"}
+    if status_code is not None and status_code >= 400:
+        return {"status": "degraded", "detail": f"远端多模态 /health HTTP {status_code}"}
+    ok = payload.get("ok") if isinstance(payload, dict) else None
+    if ok is not True:
+        return {"status": "degraded", "detail": "远端多模态 /health 未返回 ok:true"}
+    return {"status": "healthy", "detail": "远端多模态 /health ok"}
+
+
 def last_backup(db):
     """最近一次备份结果。"""
     row = db.query(BackupJob).order_by(BackupJob.id.desc()).first()
@@ -243,8 +303,12 @@ def metrics(db, ctx, gpu_timeout=3.0):
     return {"status": _overall(checks), "metrics": checks}
 
 
-def dependencies(db, ctx, timeout=3.0, milvus_probe=None, neo4j_probe=None, gpu_timeout=3.0):
-    """全量依赖检查：每一项独立超时、独立状态，单依赖失败不影响其它项。"""
+def dependencies(db, ctx, timeout=3.0, milvus_probe=None, neo4j_probe=None, gpu_timeout=3.0, multimodal_probe=None):
+    """全量依赖检查：每一项独立超时、独立状态，单依赖失败不影响其它项。
+
+    I3.3：远端多模态单独上报 healthy/degraded/down，不计入本地聚合
+    （远端离线不视为本机系统故障，不使普通聊天退出流量）。
+    """
     checks = {
         "api": {"status": "ok", "detail": "服务运行中"},
         "sqlite": check_sqlite(ctx.get("db_path")),
@@ -259,7 +323,9 @@ def dependencies(db, ctx, timeout=3.0, milvus_probe=None, neo4j_probe=None, gpu_
             probe=neo4j_probe,
         ),
         "gpu": check_gpu(timeout=gpu_timeout),
+        "multimodal": check_multimodal(timeout=timeout, probe=multimodal_probe),
         "last_backup": last_backup(db),
         "last_alert": last_alert(db),
     }
-    return {"status": _overall(checks), "dependencies": checks}
+    local_checks = {key: value for key, value in checks.items() if key != "multimodal"}
+    return {"status": _overall(local_checks), "dependencies": checks}
