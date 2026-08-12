@@ -72,7 +72,11 @@ services:
       - MINERU_OCR_URI=http://mineru-api:5051
       - MODEL_DIR=/models
       - RUNNING_IN_DOCKER=true
-      - MULTIMODAL_KB_API_BASE=${MULTIMODAL_KB_API_BASE:-http://10.16.33.2:8002/api/v1}
+      # I1.1/I1.3：多模态由 MULTIMODAL_ENABLED + MULTIMODAL_MODE 显式控制；
+      # Base URL 不再有硬编码私网 IP 静默默认值（未配置即为多模态未启用）。
+      - MULTIMODAL_ENABLED=${MULTIMODAL_ENABLED:-}
+      - MULTIMODAL_MODE=${MULTIMODAL_MODE:-remote}
+      - MULTIMODAL_KB_API_BASE=${MULTIMODAL_KB_API_BASE:-}
       - MULTIMODAL_KB_DEFAULT_KB_ID=${MULTIMODAL_KB_DEFAULT_KB_ID:-}
       - MULTIMODAL_KB_TIMEOUT=${MULTIMODAL_KB_TIMEOUT:-30}
       - MULTIMODAL_KB_TOP_K=${MULTIMODAL_KB_TOP_K:-5}
@@ -378,6 +382,9 @@ services:
       dockerfile: Dockerfile
     image: olmocr-service:latest
     container_name: olmocr-service
+    # I1.2：rag-backend 专用的 OCR 服务同样只随 local-multimodal profile 启动。
+    profiles:
+      - local-multimodal
     deploy:
       resources:
         reservations:
@@ -408,6 +415,10 @@ services:
       context: ./mul_rag/backend  # 指定 Dockerfile 所在的目录
       dockerfile: Dockerfile
     container_name: multimodal_rag_backend
+    # I1.2：本地多模态 RAG 后端只随 local-multimodal profile 启动，
+    # 默认/生产启动不拉起本机 8002 服务。
+    profiles:
+      - local-multimodal
     ports:
       - "8002:8002"  # 映射主机 8002 到容器 8002
     volumes:

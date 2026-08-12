@@ -10,12 +10,16 @@
 
 services:
   api:
+    # I2.1：生产与基础 Compose 保持同一 SQLite 持久化策略——命名卷 /app/db。
+    # !override 会整表替换基础 volumes，因此必须显式补回 sage_db 卷，
+    # 否则 SAGE_DB_PATH=/app/db/server.db 会写进容器临时层，容器重建即丢数据。
     volumes: !override
       - ./saves:/app/saves
       - ./tianshu/data/output:/app/output:rw
       - ./indexing:/app/indexing:rw
       - ./indexing_drill:/app/indexing_drill:rw
       - ${MODEL_DIR:-./models}:/models
+      - sage_db:/app/db
     ports: !reset []
     command: uv run uvicorn server.main:app --host 0.0.0.0 --port 5050 --workers 1
     extra_hosts: !reset []
@@ -32,7 +36,12 @@ services:
       - MINERU_OCR_URI=http://mineru-api:5051
       - MODEL_DIR=/models
       - RUNNING_IN_DOCKER=true
-      - MULTIMODAL_KB_API_BASE=${MULTIMODAL_KB_API_BASE:-http://10.16.33.2:8002/api/v1}
+      # I2.1：生产 SQLite 与基础 Compose 一致，落在命名卷 /app/db。
+      - SAGE_DB_PATH=/app/db/server.db
+      # I1.1/I1.3：生产显式 remote 模式；Base URL 必须显式配置，禁止私网 IP 静默默认值。
+      - MULTIMODAL_ENABLED=${MULTIMODAL_ENABLED:?Set MULTIMODAL_ENABLED}
+      - MULTIMODAL_MODE=remote
+      - MULTIMODAL_KB_API_BASE=${MULTIMODAL_KB_API_BASE:?Set MULTIMODAL_KB_API_BASE}
       - MULTIMODAL_KB_DEFAULT_KB_ID=${MULTIMODAL_KB_DEFAULT_KB_ID:-}
       - MULTIMODAL_KB_TIMEOUT=${MULTIMODAL_KB_TIMEOUT:-30}
       - MULTIMODAL_KB_TOP_K=${MULTIMODAL_KB_TOP_K:-5}

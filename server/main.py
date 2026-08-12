@@ -19,6 +19,7 @@ from server.services.http_clients import (
     close_tianshu_client,
 )
 from server.utils.auth_middleware import is_public_path
+from server.utils import multimodal_remote
 from src import config, shutdown_runtime
 from src.utils.logging_config import logger
 
@@ -74,6 +75,21 @@ async def app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     alert_stop = asyncio.Event()
     alert_task = asyncio.create_task(_run_alert_checker(alert_stop))
+    # I1.5：启动日志只打印「多模态已启用/模式/目标主机脱敏标识」，绝不打印秘密
+    _multimodal_base = multimodal_remote.get_multimodal_api_base()
+    if _multimodal_base:
+        logger.info(
+            "多模态已启用 mode=%s target=%s",
+            multimodal_remote.get_multimodal_mode(),
+            multimodal_remote.sanitize_base_url_for_log(_multimodal_base),
+        )
+    elif multimodal_remote.is_multimodal_enabled():
+        logger.warning(
+            "MULTIMODAL_ENABLED 已开启但未配置有效目标（mode=%s），多模态实际未启用",
+            multimodal_remote.get_multimodal_mode(),
+        )
+    else:
+        logger.info("多模态未启用（MULTIMODAL_ENABLED=false）")
     try:
         yield
     finally:

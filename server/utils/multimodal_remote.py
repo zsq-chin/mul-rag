@@ -45,11 +45,15 @@ def _multimodal_allow_http() -> bool:
     return os.getenv("MULTIMODAL_ALLOW_HTTP", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _validate_multimodal_base_url(raw: str) -> str:
+def _validate_multimodal_base_url(raw: str, allow_http: bool | None = None) -> str:
     """校验并规范化远端 Base URL（B1.3/B1.4）。
 
     要求：
-    - scheme 只能是 https（默认）或显式放行 MULTIMODAL_ALLOW_HTTP=1 的 http；
+    - scheme 只能是 https（默认）或放行 http；http 放行规则由 *allow_http* 决定：
+      - None → 取环境变量 MULTIMODAL_ALLOW_HTTP（remote 模式：放行 http 必须显式配置，
+        同时满足固定内网地址、防火墙白名单和服务间认证）；
+      - True → 无条件放行（local 调试模式：Base URL 只来自服务端环境、操作者显式
+        选择 local 本机/容器内联后端，不存在浏览器注入面，无需额外逃逸开关）；
     - host 非空、不含用户名/密码与控制字符；
     - port 合法（1..65535）；
     - path 必须以 /api/v1 前缀开头；
@@ -71,7 +75,8 @@ def _validate_multimodal_base_url(raw: str) -> str:
     if scheme == "https":
         pass
     elif scheme == "http":
-        if not _multimodal_allow_http():
+        http_allowed = _multimodal_allow_http() if allow_http is None else allow_http
+        if not http_allowed:
             raise MultimodalConfigError(
                 "多模态远端 Base URL 使用 http 但未显式设置 MULTIMODAL_ALLOW_HTTP=1；"
                 "内网阶段允许 http 必须同时满足固定内网地址、防火墙白名单和服务间认证"
@@ -100,13 +105,82 @@ def _validate_multimodal_base_url(raw: str) -> str:
     return value
 
 
-def get_multimodal_api_base() -> str | None:
-    """返回经校验的远端 Base URL，仅来自服务端环境配置。
+def get_multimodal_mode() -> str:
+    """多模态模式：remote | local（I1.1）。
 
+    - `remote`：目标来自服务端环境注入的 MULTIMODAL_REMOTE_BASE_URL /
+      MULTIMODAL_KB_API_BASE（生产使用）；
+    - `local`：目标为本机/容器内联的多模态 RAG 后端（MULTIMODAL_LOCAL_BASE_URL，
+      默认 http://127.0.0.1:8002/api/v1），仅配合 `local-multimodal` Compose profile
+      本地调试使用。
+    非法值按 remote 处理并记 warning。默认 remote。
+    """
+    raw = (os.getenv("MULTIMODAL_MODE") or "remote").strip().lower()
+    if raw not in ("remote", "local"):
+        logger.warning("MULTIMODAL_MODE=%r 非法，按 remote 处理", raw)
+        return "remote"
+    return raw
+
+
+def is_multimodal_enabled() -> bool:
+    """多模态显式开关（I1.1）。
+
+    - 显式 true/1/yes/on → 启用；
+    - 显式 false/0/no/off → 禁用；
+    - 未设置/为空 → 向后兼容：配置了模式或 Base URL 即视为启用（保持此前
+      “配置 Base URL 即启用”的语义）。
+    """
+    raw = (os.getenv("MULTIMODAL_ENABLED") or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def _local_multimodal_base_url() -> str:
+    """local 模式的目标地址（仅本地调试）。默认 127.0.0.1:8002。"""
+    return (os.getenv("MULTIMODAL_LOCAL_BASE_URL") or "http://127.0.0.1:8002/api/v1").strip()
+
+
+def sanitize_base_url_for_log(base_url: str) -> str:
+    """日志用脱敏标识：只保留 scheme://host[:port]，去掉路径/query/fragment。
+
+    绝不打印 Token、密码、密钥或完整 URL 其余部分（I1.5）。
+    """
+    value = str(base_url or "").strip()
+    if not value:
+        return "(未配置)"
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "(非法)"
+    host = parsed.hostname or ""
+    if not host:
+        return "(无 host)"
+    port = parsed.port
+    port_part = f":{port}" if port else ""
+    return f"{parsed.scheme}://{host}{port_part}"
+
+
+def get_multimodal_api_base() -> str | None:
+    """返回经校验的多模态 Base URL，仅来自服务端环境配置（I1.1）。
+
+    - 显式关闭（MULTIMODAL_ENABLED=false）或未配置目标 → None（多模态未启用）；
+    - `remote` 模式：仅取 MULTIMODAL_REMOTE_BASE_URL / MULTIMODAL_KB_API_BASE；
+    - `local` 模式：取 MULTIMODAL_LOCAL_BASE_URL（默认本机 8002）；
     - 浏览器/聊天 meta 无法覆盖（消除 SSRF 与客户端配置注入）；
-    - 未配置时返回 None（多模态未启用）；
     - 配置非法时抛 MultimodalConfigError。
     """
+    if not is_multimodal_enabled():
+        return None
+    if get_multimodal_mode() == "local":
+        local = _local_multimodal_base_url()
+        if not local:
+            return None
+        # local 调试模式：http 目标（默认 127.0.0.1:8002）由操作者显式选择且只来自
+        # 服务端环境，不要求 MULTIMODAL_ALLOW_HTTP=1 逃逸开关；其余校验保持不变。
+        return _validate_multimodal_base_url(local, allow_http=True)
     raw = (
         os.getenv("MULTIMODAL_REMOTE_BASE_URL")
         or os.getenv("MULTIMODAL_KB_API_BASE")
