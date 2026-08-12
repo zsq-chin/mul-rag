@@ -3,12 +3,14 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 import httpx
+import requests
 
 
 GRAPH_WORKER_URL = os.getenv("GRAPH_WORKER_URL", "http://graphrag-worker:8111")
 
 _multimodal_client: httpx.AsyncClient | None = None
 _graph_worker_client: httpx.AsyncClient | None = None
+_multimodal_sync_session: requests.Session | None = None
 
 
 def _env_float(name: str, default: float) -> float:
@@ -55,6 +57,39 @@ async def close_multimodal_client() -> None:
     if _multimodal_client is not None and not _multimodal_client.is_closed:
         await _multimodal_client.aclose()
     _multimodal_client = None
+
+
+def get_multimodal_sync_session() -> requests.Session:
+    """App-level shared sync connection pool for retriever-side multimodal calls.
+
+    C1.2：检索器保持同步时使用应用级复用连接池，避免每次检索新建 TCP 连接。
+    requests.Session 携带 urllib3 连接池；重试策略由 MultimodalRemoteClient 显式
+    控制（此处关闭 urllib3 自动重试，避免与客户端策略叠加）。必须在阻塞线程池
+    （chat_router 的 run_in_executor）内使用，不得在事件循环中直接调用。
+    """
+    global _multimodal_sync_session
+    if _multimodal_sync_session is None:
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=_env_int("MULTIMODAL_SYNC_POOL_CONNECTIONS", 10),
+            pool_maxsize=_env_int("MULTIMODAL_SYNC_POOL_MAXSIZE", 20),
+            max_retries=0,
+        )
+        session = requests.Session()
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _multimodal_sync_session = session
+    return _multimodal_sync_session
+
+
+def close_multimodal_sync_session() -> None:
+    """Release the shared sync session on application shutdown (C1.3)."""
+    global _multimodal_sync_session
+    if _multimodal_sync_session is not None:
+        try:
+            _multimodal_sync_session.close()
+        except Exception:  # noqa: BLE001 - 关闭阶段不因连接池异常中断
+            pass
+        _multimodal_sync_session = None
 
 
 def get_graph_worker_client() -> httpx.AsyncClient:
@@ -130,3 +165,4 @@ async def multimodal_client_lifespan(_app: Any) -> AsyncIterator[None]:
         await close_multimodal_client()
         await close_graph_worker_client()
         await close_tianshu_client()
+        close_multimodal_sync_session()

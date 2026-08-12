@@ -99,7 +99,11 @@
               </div>
               <div v-if="multimodalKbInfo.status">
                 <strong>检索状态：</strong>
-                <span :class="{ 'status-error': multimodalKbInfo.status === 'error' }">
+                <span
+                  :class="{
+                    'status-error': ['error', 'budget_reached', 'deadline_reached', 'user_cancelled'].includes(multimodalKbInfo.status),
+                  }"
+                >
                   {{ multimodalKbInfo.statusText }}
                 </span>
               </div>
@@ -292,10 +296,15 @@ const multimodalResultCount = computed(() => {
 const multimodalKbInfo = computed(() => {
   const refs = props.latestRefs?.multimodal_knowledge_base || {}
   const status = refs.status || (refs.message ? 'error' : '')
+  // C2.5：远端失败/检索为空/用户取消/达到预算必须呈现为不同状态，不能都伪装成空结果
   const statusTextMap = {
     ok: '检索成功',
     empty: '未检索到结果',
     error: '检索失败',
+    no_kb_selected: '未选择多模态知识库',
+    budget_reached: '已达检索预算',
+    deadline_reached: '检索超时',
+    user_cancelled: '检索已取消',
   }
 
   return {

@@ -1,6 +1,8 @@
 import json
 import re
 import hashlib
+import threading
+import time
 import traceback
 
 from src import config, knowledge_base, graph_base
@@ -50,6 +52,73 @@ def _coerce_float(value, default, minimum, maximum):
     if v < minimum:
         return default
     return min(v, maximum)
+
+
+class _MMSearchCache:
+    """多模态检索结果的短 TTL 缓存（C2.2）。
+
+    缓存键必须包含用户可见权限、`kbId`、`fileId` 与检索参数；命中缓存不
+    消耗远端预算、不发网络请求。多线程（ThreadPoolExecutor 并发会话）下用
+    锁保护。条目短 TTL 自动过期，避免跨会话/跨权限串数据。
+    """
+
+    _lock = threading.Lock()
+    _entries: dict = {}
+
+    @classmethod
+    def key_for(cls, meta, query, **params):
+        permission = str(meta.get("user_id") or meta.get("permission") or "")
+        kb = str(meta.get("multimodal_kb_id") or meta.get("multimodal_kb_name") or "")
+        file = str(meta.get("multimodal_file_id") or meta.get("file_id") or "")
+        identity = "|".join(
+            [permission, kb, file, str(query or "").strip()]
+            + [f"{k}={v}" for k, v in sorted(params.items())]
+        )
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def get(cls, key, now=None):
+        now = time.monotonic() if now is None else now
+        with cls._lock:
+            entry = cls._entries.get(key)
+            if entry is None:
+                return None
+            expires_at, payload = entry
+            if expires_at < now:
+                cls._entries.pop(key, None)
+                return None
+            return payload
+
+    @classmethod
+    def put(cls, key, payload, ttl, now=None):
+        now = time.monotonic() if now is None else now
+        with cls._lock:
+            cls._entries[key] = (now + ttl, payload)
+
+    @classmethod
+    def clear(cls):
+        with cls._lock:
+            cls._entries.clear()
+
+
+def _retrieval_cancel_signal(meta):
+    """从 meta 提取用户取消信号：`threading.Event` 或无参可调用；未提供返回 None。
+
+    路由层在客户端断开/用户取消时可通过该 seam 置位取消信号，使检索器停止
+    继续发起远端调用（C2.5「用户取消」状态）。
+    """
+    if not isinstance(meta, dict):
+        return None
+    return meta.get("_retrieval_cancelled")
+
+
+def _signal_is_set(signal) -> bool:
+    try:
+        if callable(signal):
+            return bool(signal())
+        return bool(signal.is_set())
+    except Exception:
+        return False
 
 
 class Retriever:
@@ -112,7 +181,11 @@ class Retriever:
         multimodal_refs = refs.get("multimodal_knowledge_base", {})
         multimodal_res = multimodal_refs.get("results", [])
         if multimodal_res:
-            multimodal_text = format_multimodal_context(multimodal_res)
+            mm_context_max_items = _coerce_int(config.get("multi_query_mm_context_max_items"), 5, 1, 20)
+            mm_context_max_chars = _coerce_int(config.get("multi_query_mm_context_max_chars"), 6000, 500, 100000)
+            multimodal_text = format_multimodal_context(
+                multimodal_res, max_items=mm_context_max_items, max_chars=mm_context_max_chars
+            )
             if multimodal_text:
                 external_parts.extend(["多模态知识库信息:", multimodal_text])
         elif meta.get("use_multimodal_kb") and multimodal_refs.get("message"):
@@ -256,7 +329,15 @@ class Retriever:
             return response
 
         try:
-            response.update(search_multimodal_remote(query, meta))
+            result = search_multimodal_remote(query, meta)
+            response.update(result)
+            # C2.4：限制总条数、单条文本长度与图片数
+            response["results"] = self._limit_multimodal_results(
+                response.get("results") or [],
+                max_items=_coerce_int(config.get("multi_query_mm_max_items"), 6, 1, 50),
+                max_text_chars=_coerce_int(config.get("multi_query_mm_max_text_chars"), 600, 50, 10000),
+                max_images=_coerce_int(config.get("multi_query_mm_max_images"), 3, 0, 20),
+            )
         except Exception as e:
             logger.error(f"Multimodal knowledge base search error: {e}, {traceback.format_exc()}")
             response["message"] = f"多模态知识库检索失败: {e}"
@@ -481,6 +562,71 @@ class Retriever:
             out.append(r)
         return out
 
+    @staticmethod
+    def _normalize_sub_query_key(query):
+        """规范化子问题用于近似去重（C2.2）：去首尾空白、合并空白、去尾部问号标点。"""
+        if not query:
+            return ""
+        text = str(query).strip()
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"[？?！!。．.，,]+$", "", text)
+        return text
+
+    @staticmethod
+    def _limit_multimodal_results(results, max_items=6, max_text_chars=600, max_images=3):
+        """限制合并后的多模态结果规模（C2.4）：总条数、单条文本长度与图片数。
+
+        按输入顺序保留前 ``max_items`` 条；单条文本超长截断并加省略号；
+        单条图片超过 ``max_images`` 张时截断。
+        """
+        out = []
+        for item in results:
+            if not isinstance(item, dict) or len(out) >= max_items:
+                continue
+            limited = dict(item)
+            text = str(limited.get("text") or "")
+            if len(text) > max_text_chars:
+                limited["text"] = text[: max_text_chars - 1].rstrip() + "…"
+            images = limited.get("images")
+            if isinstance(images, list) and len(images) > max_images:
+                limited["images"] = images[:max_images]
+            out.append(limited)
+        return out
+
+    @staticmethod
+    def _aggregate_mm_status(statuses, has_results, budget_hit, deadline_hit, user_cancelled):
+        """多模态检索总体状态聚合（C2.5）。
+
+        优先级：用户取消 > 达到预算 > 达到 deadline > 有结果(ok) > 远端失败(error)
+        > 未选择知识库(no_kb_selected) > 检索为空(empty) > 未启用("")。
+        远端失败/检索为空/达到预算/用户取消必须呈现为不同状态，不能都伪装成空结果。
+        """
+        if user_cancelled:
+            return "user_cancelled"
+        if budget_hit:
+            return "budget_reached"
+        if deadline_hit:
+            return "deadline_reached"
+        if has_results:
+            return "ok"
+        for state in ("error", "no_kb_selected", "empty"):
+            if state in statuses:
+                return state
+        return ""
+
+    @staticmethod
+    def _mm_state_message(status, mm_meta, budget_used, budget):
+        """多模态状态对应的展示文案；预算/deadline/取消用服务端文案，其余保留远端消息。"""
+        if status == "budget_reached":
+            return f"已达本次远端检索预算（{budget_used}/{budget}），已停止继续扩展检索"
+        if status == "deadline_reached":
+            return "已达整轮检索 deadline，已停止继续扩展检索"
+        if status == "user_cancelled":
+            return "检索已被取消"
+        if status == "empty" and not (mm_meta.get("message") or ""):
+            return "未检索到结果"
+        return mm_meta.get("message") or ""
+
     def _kb_query(self, sub_query, meta):
         """针对单个子问题执行一次知识库检索。
 
@@ -557,18 +703,76 @@ class Retriever:
         refs["graph_base"] = self.query_graph(query, history, refs)
         refs["web_search"] = self.query_web(query, history, refs)
 
-        # 多模态知识库（远程）：先以原始问题检索一次作为基线，后续每个查询也会检索
+        # 多模态知识库（远程）：先以原始问题检索一次作为基线，后续每个查询也会检索。
+        # C2：每次问答设置远端检索总预算与整轮 deadline，相同/近似子问题规范化
+        # 去重，结果短 TTL 缓存，避免查询扩展无限放大远端调用。
         use_mm = bool(meta.get("use_multimodal_kb"))
         multimodal_merged: list = []
         mm_meta: dict = {}
-        if use_mm:
+        mm_status = ""
+
+        mm_budget = _coerce_int(config.get("multi_query_multimodal_budget"), 3, 1, 10)
+        mm_deadline_seconds = _coerce_float(config.get("multi_query_deadline_seconds"), 30.0, 0.0, 300.0)
+        mm_cache_ttl = _coerce_float(config.get("multi_query_mm_cache_ttl_seconds"), 5.0, 0.0, 60.0)
+        mm_max_items = _coerce_int(config.get("multi_query_mm_max_items"), 6, 1, 50)
+        mm_max_text_chars = _coerce_int(config.get("multi_query_mm_max_text_chars"), 600, 50, 10000)
+        mm_max_images = _coerce_int(config.get("multi_query_mm_max_images"), 3, 0, 20)
+
+        mm_budget_used = 0
+        mm_budget_hit = False
+        mm_deadline_hit = False
+        mm_user_cancelled = False
+        mm_statuses: list = []
+
+        def _mm_search(q, *, deadline):
+            """在预算 / deadline / 短 TTL 缓存约束下执行一次多模态远端检索。
+
+            返回 ``(result, consumed, stopped)``：result 为远端结果 dict 或
+            None（被预算 / deadline / 用户取消阻止）；consumed 表示是否实际
+            消耗了一次远端预算；stopped 为阻止原因（"budget"/"deadline"/
+            "user_cancelled"/None）。
+            """
+            nonlocal mm_budget_used, mm_budget_hit, mm_deadline_hit, mm_user_cancelled
+            if _signal_is_set(_retrieval_cancel_signal(meta)):
+                mm_user_cancelled = True
+                return None, False, "user_cancelled"
+            top_k = _coerce_int(meta.get("topK"), 5, 1, 50)
+            cache_key = _MMSearchCache.key_for(meta, q, top_k=top_k)
+            cached = _MMSearchCache.get(cache_key)
+            if cached is not None:
+                return cached, False, None
+            if mm_budget_used >= mm_budget:
+                mm_budget_hit = True
+                return None, False, "budget"
+            if deadline is not None and time.monotonic() >= deadline:
+                mm_deadline_hit = True
+                return None, False, "deadline"
             try:
-                base_mm = search_multimodal_remote(query, meta)
+                mm_res = search_multimodal_remote(q, meta)
             except Exception as e:
                 logger.error(f"多模态知识库检索失败: {e}")
-                base_mm = {"results": [], "message": f"多模态知识库检索失败: {e}"}
-            multimodal_merged.extend(base_mm.get("results", []))
-            mm_meta = {k: base_mm.get(k) for k in ("kb_id", "kb_name", "file_id", "message", "status")}
+                mm_res = {"results": [], "message": f"多模态知识库检索失败: {e}", "status": "error"}
+            mm_budget_used += 1
+            # 错误/未选库结果不缓存，避免把瞬时失败或权限态在 TTL 内当成确定结果
+            if mm_cache_ttl > 0 and mm_res.get("status") not in ("error", "no_kb_selected"):
+                _MMSearchCache.put(cache_key, mm_res, mm_cache_ttl)
+            return mm_res, True, None
+
+        deadline: float | None = None
+        if use_mm:
+            base_mm, _, _ = _mm_search(query, deadline=None)
+            if base_mm:
+                multimodal_merged.extend(base_mm.get("results", []))
+                if base_mm.get("status"):
+                    mm_statuses.append(base_mm["status"])
+            mm_meta = {k: (base_mm or {}).get(k) for k in ("kb_id", "kb_name", "file_id", "message", "status")}
+            # 整轮 deadline 在基线检索完成后开始计时，保证基线始终执行；
+            # 0 表示立即过期（只允许基线检索）
+            deadline = (
+                time.monotonic() - 1e-6
+                if mm_deadline_seconds <= 0
+                else time.monotonic() + mm_deadline_seconds
+            )
 
         rw_query = self.rewrite_query(query, history, refs)
 
@@ -603,6 +807,7 @@ class Retriever:
         top_k = _coerce_int(meta.get("topK"), 5, 1, 50)
 
         seen_queries = set()
+        seen_normalized = set()
         sub_queries = []
         merged = []
         all_raw = []
@@ -644,8 +849,12 @@ class Retriever:
         def _retrieve(query_list):
             """检索一组查询：单个查询失败只跳过该查询，累积已检索到的结果。
 
-            同时检索普通向量知识库与（远程）多模态知识库。
+            同时检索普通向量知识库与（远程）多模态知识库。多模态部分受
+            预算 / deadline / 用户取消约束（C2）：一旦停止扩展，普通向量
+            库仍继续按其余子问题检索。
             """
+            mm_stop_reported = False
+
             for sq in query_list:
                 try:
                     results, raw = self._kb_query(sq, meta)
@@ -657,12 +866,19 @@ class Retriever:
                     logger.error(f"多轮检索：查询检索失败（{sq}）: {e}")
                     self._emit_progress(progress_cb, f"  查询「{sq}」检索失败，已跳过")
                 if use_mm:
-                    try:
-                        mm_res = search_multimodal_remote(sq, meta)
-                    except Exception as e:
-                        logger.error(f"多轮检索：多模态检索失败（{sq}）: {e}")
-                        self._emit_progress(progress_cb, f"  查询「{sq}」多模态检索失败，已跳过")
+                    mm_res, _, stopped = _mm_search(sq, deadline=deadline)
+                    if mm_res is None:
+                        if stopped and not mm_stop_reported:
+                            mm_stop_reported = True
+                            if stopped == "user_cancelled":
+                                self._emit_progress(progress_cb, "  检索已被取消，停止多模态扩展")
+                            elif stopped == "budget":
+                                self._emit_progress(progress_cb, f"  已达到远端检索预算（{mm_budget_used}/{mm_budget}），停止多模态扩展")
+                            elif stopped == "deadline":
+                                self._emit_progress(progress_cb, "  已达到整轮检索 deadline，停止多模态扩展")
                         continue
+                    if mm_res.get("status"):
+                        mm_statuses.append(mm_res["status"])
                     multimodal_merged.extend(mm_res.get("results", []))
 
         self._emit_progress(progress_cb, f"多轮检索启动：最多 {max_rounds} 轮，每轮由模型生成 {query_count} 个检索查询")
@@ -672,9 +888,11 @@ class Retriever:
         generated = self.generate_sub_queries(rw_query, history, meta, query_count)
         round1_queries = []
         for sq in [rw_query] + list(generated):
-            if not sq or sq in seen_queries:
+            norm_key = self._normalize_sub_query_key(sq)
+            if not sq or sq in seen_queries or norm_key in seen_normalized:
                 continue
             seen_queries.add(sq)
+            seen_normalized.add(norm_key)
             round1_queries.append(sq)
             sub_queries.append(sq)
             self._emit_progress(progress_cb, f"  检索查询：{sq}")
@@ -709,9 +927,11 @@ class Retriever:
             )
             round_queries = []
             for sq in refined:
-                if not sq or sq in seen_queries:
+                norm_key = self._normalize_sub_query_key(sq)
+                if not sq or sq in seen_queries or norm_key in seen_normalized:
                     continue
                 seen_queries.add(sq)
+                seen_normalized.add(norm_key)
                 round_queries.append(sq)
                 sub_queries.append(sq)
                 self._emit_progress(progress_cb, f"  第{round_no}轮 检索查询：{sq}")
@@ -749,10 +969,26 @@ class Retriever:
             "message": "",
         }
         if use_mm:
+            mm_deduped = self._limit_multimodal_results(
+                self._dedupe_multimodal(multimodal_merged),
+                max_items=mm_max_items,
+                max_text_chars=mm_max_text_chars,
+                max_images=mm_max_images,
+            )
+            mm_status = self._aggregate_mm_status(
+                statuses=mm_statuses,
+                has_results=bool(mm_deduped),
+                budget_hit=mm_budget_hit,
+                deadline_hit=mm_deadline_hit,
+                user_cancelled=mm_user_cancelled,
+            )
             refs["multimodal_knowledge_base"] = {
                 **mm_meta,
-                "results": self._dedupe_multimodal(multimodal_merged),
-                "message": mm_meta.get("message") or "",
+                "results": mm_deduped,
+                "status": mm_status,
+                "message": self._mm_state_message(mm_status, mm_meta, mm_budget_used, mm_budget),
+                "budget_used": mm_budget_used,
+                "budget_limit": mm_budget,
             }
         else:
             refs["multimodal_knowledge_base"] = {
@@ -770,6 +1006,9 @@ class Retriever:
             "total_rounds": len(round_log),
             "final_recall": len(final),
             "assessment": assessment,
+            "mm_status": mm_status,
+            "mm_budget_used": mm_budget_used if use_mm else 0,
+            "mm_budget_limit": mm_budget if use_mm else 0,
         }
         verdict = "，模型认为内容足够" if assessment.get("has_value") else "，模型未确认检索到足够有价值的内容"
         self._emit_progress(

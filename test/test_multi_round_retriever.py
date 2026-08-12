@@ -423,7 +423,47 @@ class GenerateSubQueriesTests(unittest.TestCase):
         self.assertEqual(out, ["原始问题"])
 
 
+class SubQueryNormalizeTests(unittest.TestCase):
+    def test_normalize_strips_whitespace_and_trailing_punctuation(self):
+        r = Retriever()
+        key = r._normalize_sub_query_key("  井身结构设计的关键内容？ ")
+        self.assertEqual(key, "井身结构设计的关键内容")
+
+    def test_near_duplicate_keys_equal(self):
+        r = Retriever()
+        self.assertEqual(
+            r._normalize_sub_query_key("压裂施工参数有哪些？"),
+            r._normalize_sub_query_key("压裂施工参数有哪些"),
+        )
+
+
+class MultimodalLimitTests(unittest.TestCase):
+    def test_limit_caps_total_count(self):
+        r = Retriever()
+        results = [{"fileId": f"f{i}", "page": i, "text": "t"} for i in range(10)]
+        out = r._limit_multimodal_results(results, max_items=3, max_text_chars=100, max_images=5)
+        self.assertEqual(len(out), 3)
+
+    def test_limit_truncates_text_and_caps_images(self):
+        r = Retriever()
+        results = [
+            {
+                "fileId": "f1",
+                "page": 1,
+                "text": "x" * 100,
+                "images": [{"path": f"i{n}"} for n in range(5)],
+            }
+        ]
+        out = r._limit_multimodal_results(results, max_items=10, max_text_chars=10, max_images=2)
+        self.assertLessEqual(len(out[0]["text"]), 11)  # 截断 + 省略号
+        self.assertEqual(len(out[0]["images"]), 2)
+
+
 class MultiRoundRetrievalTests(unittest.TestCase):
+    def setUp(self):
+        # C2 短 TTL 缓存是模块级单例，必须在每个用例前清空，避免跨用例串数据
+        _retriever_mod._MMSearchCache.clear()
+
     def test_stops_after_round_one_when_recall_sufficient(self):
         model = _ScriptedModel([("GEN", json.dumps(["q1", "q2", "q3"])), _assess_ok()])
         kb = _FakeKB(default_results=[_res(1), _res(2), _res(3), _res(4), _res(5)])
@@ -608,6 +648,197 @@ class MultiRoundRetrievalTests(unittest.TestCase):
         self.assertIn("mm-原始问题", texts)
         self.assertIn("mm-q2", texts)
         self.assertNotIn("mm-q1", texts)
+
+    def test_multimodal_budget_caps_remote_calls(self):
+        """每次问答的远端检索总预算限制远端调用次数，超出时停止扩展并标记状态。"""
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2", "q3", "q4"])), _assess_ok()])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")], "q1": [_res(1, "a")]})
+        r, kb = _make_retriever(kb, model)
+
+        mm_calls = []
+
+        def _fake_mm(query, meta=None):
+            mm_calls.append(query)
+            return {"results": [_mm_res(1, f"mm-{query}")], "message": "", "kb_id": "kb", "kb_name": "mm", "status": "ok"}
+
+        _mm_remote.search_multimodal_remote.side_effect = _fake_mm
+        _cfg["multi_query_multimodal_budget"] = 2
+        try:
+            refs = r.multi_round_retrieval(
+                "原始问题", [], {"query": "原始问题", "history": [], "meta": _meta(use_multimodal_kb=True, topK=10)},
+            )
+        finally:
+            _cfg.pop("multi_query_multimodal_budget", None)
+
+        # 预算=2：基线 1 次 + 扩展最多 1 次；达到预算后停止扩展
+        self.assertLessEqual(len(mm_calls), 2)
+        self.assertEqual(refs["multimodal_knowledge_base"]["status"], "budget_reached")
+        self.assertEqual(refs["multimodal_knowledge_base"]["budget_limit"], 2)
+        self.assertLessEqual(refs["multimodal_knowledge_base"]["budget_used"], 2)
+
+    def test_multimodal_near_duplicate_subqueries_deduped(self):
+        """近似重复的子问题（仅尾部标点/空白不同）只触发一次远端检索。"""
+        model = _ScriptedModel([
+            ("GEN", json.dumps(["井身结构设计的关键内容", "井身结构设计的关键内容？"])),
+            _assess_ok(),
+        ])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")]})
+        r, kb = _make_retriever(kb, model)
+
+        mm_calls = []
+
+        def _fake_mm(query, meta=None):
+            mm_calls.append(query)
+            return {"results": [_mm_res(1, f"mm-{query}")], "message": "", "kb_id": "kb", "kb_name": "mm", "status": "ok"}
+
+        _mm_remote.search_multimodal_remote.side_effect = _fake_mm
+
+        refs = r.multi_round_retrieval(
+            "原始问题", [], {"query": "原始问题", "history": [], "meta": _meta(use_multimodal_kb=True, topK=10)},
+        )
+        # 改写查询本身 + 规范化去重后的唯一子问题
+        self.assertEqual(set(mm_calls), {"原始问题", "井身结构设计的关键内容"})
+
+    def test_multimodal_deadline_stops_expansion(self):
+        """整轮检索 deadline=0 时，基线检索后立即停止扩展，状态为 deadline_reached。"""
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2"])), _assess_ok()])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")]})
+        r, kb = _make_retriever(kb, model)
+
+        mm_calls = []
+
+        def _fake_mm(query, meta=None):
+            mm_calls.append(query)
+            return {"results": [_mm_res(1, f"mm-{query}")], "message": "", "kb_id": "kb", "kb_name": "mm", "status": "ok"}
+
+        _mm_remote.search_multimodal_remote.side_effect = _fake_mm
+        _cfg["multi_query_deadline_seconds"] = 0
+        try:
+            refs = r.multi_round_retrieval(
+                "原始问题", [], {"query": "原始问题", "history": [], "meta": _meta(use_multimodal_kb=True, topK=10)},
+            )
+        finally:
+            _cfg.pop("multi_query_deadline_seconds", None)
+
+        self.assertEqual(len(mm_calls), 1)
+        self.assertEqual(refs["multimodal_knowledge_base"]["status"], "deadline_reached")
+
+    def test_multimodal_no_kb_selected_state_propagates(self):
+        """未选择知识库返回独立状态 no_kb_selected，不伪装成空结果。"""
+        model = _ScriptedModel([("GEN", json.dumps(["q1"])), _assess_ok()])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")]})
+        r, kb = _make_retriever(kb, model)
+
+        def _no_kb_mm(query, meta=None):
+            return {"results": [], "message": "未选择多模态知识库", "kb_id": None, "kb_name": None, "status": "no_kb_selected"}
+
+        _mm_remote.search_multimodal_remote.side_effect = _no_kb_mm
+
+        refs = r.multi_round_retrieval(
+            "原始问题", [], {"query": "原始问题", "history": [], "meta": _meta(use_multimodal_kb=True, topK=10)},
+        )
+        self.assertEqual(refs["multimodal_knowledge_base"]["status"], "no_kb_selected")
+        self.assertEqual(refs["multimodal_knowledge_base"]["results"], [])
+
+    def test_multimodal_empty_is_distinct_state(self):
+        """检索为空返回独立状态 empty，不与远端失败混淆。"""
+        model = _ScriptedModel([("GEN", json.dumps(["q1"])), _assess_ok()])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")]})
+        r, kb = _make_retriever(kb, model)
+
+        def _empty_mm(query, meta=None):
+            return {"results": [], "message": "未检索到结果", "kb_id": "kb", "kb_name": "mm", "status": "empty"}
+
+        _mm_remote.search_multimodal_remote.side_effect = _empty_mm
+
+        refs = r.multi_round_retrieval(
+            "原始问题", [], {"query": "原始问题", "history": [], "meta": _meta(use_multimodal_kb=True, topK=10)},
+        )
+        self.assertEqual(refs["multimodal_knowledge_base"]["status"], "empty")
+        self.assertEqual(refs["multimodal_knowledge_base"]["results"], [])
+
+    def test_multimodal_merged_results_limited(self):
+        """合并结果限制总条数与单条图片数（服务端可配置）。"""
+        model = _ScriptedModel([("GEN", json.dumps(["q1", "q2"])), _assess_ok()])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")], "q1": [_res(1, "a")]})
+        r, kb = _make_retriever(kb, model)
+
+        def _big_mm(query, meta=None):
+            return {
+                "results": [
+                    {
+                        "id": i, "rank": i, "fileId": "f1", "fileName": "f1.pdf", "page": i,
+                        "score": 0.9, "contentType": "text", "text": f"text-{query}-{i}",
+                        "images": [{"path": f"i{n}"} for n in range(5)],
+                    }
+                    for i in range(5)
+                ],
+                "message": "", "kb_id": "kb", "kb_name": "mm", "status": "ok",
+            }
+
+        _mm_remote.search_multimodal_remote.side_effect = _big_mm
+        _cfg["multi_query_mm_max_items"] = 2
+        _cfg["multi_query_mm_max_images"] = 1
+        try:
+            refs = r.multi_round_retrieval(
+                "原始问题", [], {"query": "原始问题", "history": [], "meta": _meta(use_multimodal_kb=True, topK=10)},
+            )
+        finally:
+            _cfg.pop("multi_query_mm_max_items", None)
+            _cfg.pop("multi_query_mm_max_images", None)
+
+        results = refs["multimodal_knowledge_base"]["results"]
+        self.assertLessEqual(len(results), 2)
+        for item in results:
+            self.assertLessEqual(len(item["images"]), 1)
+
+    def test_multimodal_cache_hits_skip_network(self):
+        """同一会话短时间重复问题命中短 TTL 缓存，不再消耗远端预算。"""
+        model = _ScriptedModel([("GEN", json.dumps(["q1"])), _assess_ok()])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")]})
+        r, kb = _make_retriever(kb, model)
+
+        mm_calls = []
+
+        def _fake_mm(query, meta=None):
+            mm_calls.append(query)
+            return {"results": [_mm_res(1, "cached-text")], "message": "", "kb_id": "kb", "kb_name": "mm", "status": "ok"}
+
+        _mm_remote.search_multimodal_remote.side_effect = _fake_mm
+
+        meta = _meta(use_multimodal_kb=True, topK=10)
+        r.multi_round_retrieval("原始问题", [], {"query": "原始问题", "history": [], "meta": meta})
+        first_count = len(mm_calls)
+        self.assertGreater(first_count, 0)
+        r.multi_round_retrieval("原始问题", [], {"query": "原始问题", "history": [], "meta": meta})
+        # 第二次进入：基线/子问题全部命中缓存，不发网络请求
+        self.assertEqual(len(mm_calls), first_count)
+
+    def test_multimodal_user_cancel_is_distinct_state(self):
+        """用户取消返回独立状态 user_cancelled，不再发起远端调用。"""
+        import threading
+
+        model = _ScriptedModel([("GEN", json.dumps(["q1"])), _assess_ok()])
+        kb = _FakeKB(results_by_query={"原始问题": [_res(0, "orig")]})
+        r, kb = _make_retriever(kb, model)
+
+        mm_calls = []
+
+        def _fake_mm(query, meta=None):
+            mm_calls.append(query)
+            return {"results": [_mm_res(1, "x")], "message": "", "kb_id": "kb", "kb_name": "mm", "status": "ok"}
+
+        _mm_remote.search_multimodal_remote.side_effect = _fake_mm
+
+        cancel = threading.Event()
+        cancel.set()
+        meta = _meta(use_multimodal_kb=True, topK=10)
+        meta["_retrieval_cancelled"] = cancel
+        refs = r.multi_round_retrieval(
+            "原始问题", [], {"query": "原始问题", "history": [], "meta": meta},
+        )
+        self.assertEqual(len(mm_calls), 0)
+        self.assertEqual(refs["multimodal_knowledge_base"]["status"], "user_cancelled")
 
 
 if __name__ == "__main__":

@@ -54,11 +54,10 @@ class BaseUrlInjectionTests(unittest.TestCase):
         with patch.dict(
             os.environ, {"MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE}, clear=False
         ):
-            with patch("server.utils.multimodal_remote.requests.get") as mock_get, patch(
-                "server.utils.multimodal_remote.requests.post"
-            ) as mock_post:
-                mock_get.return_value = _kb_list_response()
-                mock_post.return_value = _search_ok_response()
+            with patch("server.utils.multimodal_remote.get_multimodal_sync_session") as mock_gs:
+                session = mock_gs.return_value
+                session.get.return_value = _kb_list_response()
+                session.post.return_value = _search_ok_response()
 
                 result = search_multimodal_remote(
                     "井身结构设计",
@@ -69,9 +68,9 @@ class BaseUrlInjectionTests(unittest.TestCase):
                 )
 
         # kb_id 由用户提供，不触发 kb/list 探测；只有 index/search 发往固定远端
-        mock_get.assert_not_called()
-        mock_post.assert_called_once()
-        post_url = mock_post.call_args.args[0]
+        session.get.assert_not_called()
+        session.post.assert_called_once()
+        post_url = session.post.call_args.args[0]
         self.assertTrue(post_url.startswith(FIXED_BASE))
         self.assertNotIn("169.254.169.254", post_url)
         self.assertEqual(result["status"], "ok")
@@ -79,15 +78,14 @@ class BaseUrlInjectionTests(unittest.TestCase):
     def test_meta_loopback_base_url_is_ignored(self):
         """伪造 base_url 指向本机回环地址也不影响请求目标。"""
         with patch.dict(os.environ, {"MULTIMODAL_KB_API_BASE": FIXED_BASE}, clear=False):
-            with patch("server.utils.multimodal_remote.requests.get") as mock_get, patch(
-                "server.utils.multimodal_remote.requests.post"
-            ) as mock_post:
-                mock_get.return_value = _kb_list_response()
-                mock_post.return_value = _search_ok_response()
+            with patch("server.utils.multimodal_remote.get_multimodal_sync_session") as mock_gs:
+                session = mock_gs.return_value
+                session.get.return_value = _kb_list_response()
+                session.post.return_value = _search_ok_response()
 
                 search_multimodal_remote("q", {"multimodal_api_base": LOOPBACK_URL, "multimodal_kb_id": "kb-1"})
 
-        post_url = mock_post.call_args.args[0]
+        post_url = session.post.call_args.args[0]
         self.assertTrue(post_url.startswith(FIXED_BASE))
         self.assertNotIn("127.0.0.1", post_url)
 
@@ -100,11 +98,9 @@ class ConfigInjectionTests(unittest.TestCase):
             {"MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE, "MULTIMODAL_KB_TIMEOUT": "30"},
             clear=False,
         ):
-            with patch("server.utils.multimodal_remote.requests.get") as mock_get, patch(
-                "server.utils.multimodal_remote.requests.post"
-            ) as mock_post:
-                mock_get.return_value = _kb_list_response()
-                mock_post.return_value = _search_ok_response()
+            with patch("server.utils.multimodal_remote.get_multimodal_sync_session") as mock_gs:
+                session = mock_gs.return_value
+                session.post.return_value = _search_ok_response()
 
                 search_multimodal_remote(
                     "q",
@@ -114,43 +110,38 @@ class ConfigInjectionTests(unittest.TestCase):
                     },
                 )
 
-        mock_get.assert_not_called()
-        self.assertEqual(mock_post.call_args.kwargs["timeout"], 30)
+        session.get.assert_not_called()
+        self.assertEqual(session.post.call_args.kwargs["timeout"], 30)
 
     def test_meta_top_k_clamped_to_1_20(self):
         """meta 超大/超小 top_k 被钳制到 1..20。"""
         with patch.dict(os.environ, {"MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE}, clear=False):
-            with patch("server.utils.multimodal_remote.requests.get") as mock_get, patch(
-                "server.utils.multimodal_remote.requests.post"
-            ) as mock_post:
-                mock_get.return_value = _kb_list_response()
-                mock_post.return_value = _search_ok_response()
+            with patch("server.utils.multimodal_remote.get_multimodal_sync_session") as mock_gs:
+                session = mock_gs.return_value
+                session.post.return_value = _search_ok_response()
 
                 search_multimodal_remote("q", {"multimodal_kb_id": "kb-1", "multimodal_top_k": 99})
-                body = mock_post.call_args.kwargs["json"]
+                body = session.post.call_args.kwargs["json"]
                 self.assertEqual(body["k"], 20)
 
         with patch.dict(os.environ, {"MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE}, clear=False):
-            with patch("server.utils.multimodal_remote.requests.get") as mock_get, patch(
-                "server.utils.multimodal_remote.requests.post"
-            ) as mock_post:
-                mock_get.return_value = _kb_list_response()
-                mock_post.return_value = _search_ok_response()
+            with patch("server.utils.multimodal_remote.get_multimodal_sync_session") as mock_gs:
+                session = mock_gs.return_value
+                session.post.return_value = _search_ok_response()
 
                 search_multimodal_remote("q", {"multimodal_kb_id": "kb-1", "multimodal_top_k": -5})
-                body = mock_post.call_args.kwargs["json"]
+                body = session.post.call_args.kwargs["json"]
                 self.assertEqual(body["k"], 1)
 
     def test_malicious_kb_id_rejected_without_network(self):
         """kbId 带绝对路径/控制字符/URL 时拒绝检索，不发网络请求。"""
         for bad_kb in ("/etc/passwd", "https://evil.example/api", "..\\..\\secret", "kb\x00id"):
             with patch.dict(os.environ, {"MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE}, clear=False):
-                with patch("server.utils.multimodal_remote.requests.get") as mock_get, patch(
-                    "server.utils.multimodal_remote.requests.post"
-                ) as mock_post:
+                with patch("server.utils.multimodal_remote.get_multimodal_sync_session") as mock_gs:
+                    session = mock_gs.return_value
                     result = search_multimodal_remote("q", {"multimodal_kb_id": bad_kb})
-            mock_get.assert_not_called()
-            mock_post.assert_not_called()
+            session.get.assert_not_called()
+            session.post.assert_not_called()
             self.assertEqual(result["status"], "error")
             self.assertEqual(result["results"], [])
 
@@ -159,11 +150,9 @@ class ResultLeakTests(unittest.TestCase):
     def test_result_does_not_expose_base_url_or_raw(self):
         """检索结果不包含 base_url、远端绝对路径或原始上游响应 raw。"""
         with patch.dict(os.environ, {"MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE}, clear=False):
-            with patch("server.utils.multimodal_remote.requests.get") as mock_get, patch(
-                "server.utils.multimodal_remote.requests.post"
-            ) as mock_post:
-                mock_get.return_value = _kb_list_response()
-                mock_post.return_value = _search_ok_response()
+            with patch("server.utils.multimodal_remote.get_multimodal_sync_session") as mock_gs:
+                session = mock_gs.return_value
+                session.post.return_value = _search_ok_response()
 
                 result = search_multimodal_remote("q", {"multimodal_kb_id": "kb-1"})
 

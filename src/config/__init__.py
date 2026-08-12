@@ -292,7 +292,7 @@ class Config(SimpleConfig):
         if self.filename is not None and os.path.exists(self.filename):
 
             if self.filename.endswith(".json"):
-                with open(self.filename) as f:
+                with open(self.filename, encoding="utf-8") as f:
                     content = f.read()
                     if content:
                         local_config = json.loads(content)
@@ -301,7 +301,7 @@ class Config(SimpleConfig):
                         print(f"{self.filename} is empty.")
 
             elif self.filename.endswith(".yaml"):
-                with open(self.filename) as f:
+                with open(self.filename, encoding="utf-8") as f:
                     content = f.read()
                     if content:
                         local_config = yaml.safe_load(content)

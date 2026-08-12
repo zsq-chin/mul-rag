@@ -44,17 +44,16 @@ class ServiceTokenTests(unittest.TestCase):
         {"MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE, "MULTIMODAL_SERVICE_TOKEN": "svc-secret-token"},
         clear=False,
     )
-    @patch("server.utils.multimodal_remote.requests.post")
-    @patch("server.utils.multimodal_remote.requests.get")
-    def test_service_token_injected_and_not_leaked(self, mock_get, mock_post):
-        mock_get.return_value = _kb_list_response()
-        mock_post.return_value = _search_ok_response()
+    @patch("server.utils.multimodal_remote.get_multimodal_sync_session")
+    def test_service_token_injected_and_not_leaked(self, mock_gs):
+        session = mock_gs.return_value
+        session.post.return_value = _search_ok_response()
 
         result = search_multimodal_remote("q", {"multimodal_kb_id": "kb-1"})
 
-        auth = mock_post.call_args.kwargs["headers"].get("Authorization")
+        auth = session.post.call_args.kwargs["headers"].get("Authorization")
         self.assertEqual(auth, "Bearer svc-secret-token")
-        self.assertTrue(mock_post.call_args.kwargs["headers"].get("X-Sage-Trace-Id"))
+        self.assertTrue(session.post.call_args.kwargs["headers"].get("X-Sage-Trace-Id"))
         # Token 不进入返回给浏览器的结果
         dumped = json.dumps(result, ensure_ascii=False)
         self.assertNotIn("svc-secret-token", dumped)

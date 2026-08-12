@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import random
 import re
 import time
 import uuid
@@ -10,6 +11,8 @@ from typing import Any
 from urllib.parse import unquote, urlencode, urlsplit
 
 import requests
+
+from server.services.http_clients import get_multimodal_sync_session
 
 try:
     from src.utils.logging_config import logger
@@ -541,147 +544,228 @@ def _coerce_timeout(value: Any) -> float:
     return min(max(t, 5.0), 30.0)
 
 
-def _resolve_kb_id(
-    base_url: str, meta: dict[str, Any], timeout: float, headers: dict[str, str]
-) -> str | None:
-    kb_id = (
-        meta.get("multimodal_kb_id")
-        or os.getenv("MULTIMODAL_KB_DEFAULT_KB_ID")
-        or os.getenv("MULTIMODAL_REMOTE_DEFAULT_KB_ID")
-    )
-    if kb_id:
-        return _safe_identifier(kb_id, "kbId")
+class MultimodalRemoteClient:
+    """检索器侧的单一多模态远端客户端适配层（C1.1）。
 
-    response = requests.get(f"{base_url}/kb/list", timeout=timeout, headers=headers)
-    response.raise_for_status()
-    return pick_first_kb_id(response.json())
+    统一 Base URL、服务间认证、超时、连接池、DTO 归一化、错误映射、重试、指标
+    与日志。检索器保持同步（在 chat_router 的阻塞线程池中执行），因此这里使用
+    应用级复用的 ``requests.Session`` 连接池，绝不每次调用新建连接；不得在
+    FastAPI 事件循环中直接调用（C1.2）。
+
+    重试策略（C1.4）：
+    - GET（幂等）：最多一次带抖动的有限重试；
+    - 搜索 POST /index/search：最多一次可控重试；
+    - 4xx 客户端错误不重试；创建/删除/上传等非幂等操作默认不重试（本客户端不调用）。
+
+    知识库选择（C1.5）：不再在未选择知识库时自动取远端第一个知识库。kbId 只能
+    来自用户显式选择（meta.multimodal_kb_id）或服务端配置的默认库
+    （MULTIMODAL_KB_DEFAULT_KB_ID / MULTIMODAL_REMOTE_DEFAULT_KB_ID）。
+    """
+
+    def __init__(self, session: Any = None, sleep: Any = None, random_source: Any = None):
+        self._session = session  # 测试注入；None → 应用级共享连接池
+        self._sleep = sleep or time.sleep
+        self._random = random_source or random.random
+        # 轻量指标：调用/重试/失败计数（C1.1 指标统一入口）
+        self.calls = 0
+        self.retries = 0
+        self.errors = 0
+
+    def _session_for(self) -> Any:
+        if self._session is not None:
+            return self._session
+        return get_multimodal_sync_session()
+
+    def _retry_delay(self, jitter_base: float) -> None:
+        self.retries += 1
+        delay = self._random() * jitter_base
+        self._sleep(delay)
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        timeout: float,
+        max_retries: int,
+        jitter_base: float = 0.3,
+        **kwargs: Any,
+    ) -> Any:
+        """单请求发送，瞬时错误/5xx 按 max_retries 次带抖动重试；4xx 不重试。"""
+        session = self._session_for()
+        for attempt in range(max_retries + 1):
+            try:
+                if method == "GET":
+                    response = session.get(url, headers=headers, timeout=timeout, **kwargs)
+                else:
+                    response = session.post(url, headers=headers, timeout=timeout, **kwargs)
+            except requests.RequestException:
+                if attempt >= max_retries:
+                    raise
+                self._retry_delay(jitter_base)
+                continue
+            if response.status_code < 500 or attempt >= max_retries:
+                return response
+            self._retry_delay(jitter_base)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30.0,
+        params: Any = None,
+    ) -> Any:
+        """GET（幂等）：一次带抖动的有限重试（C1.4）。"""
+        return self._request(
+            "GET", url,
+            headers=headers or {}, timeout=timeout, max_retries=1,
+            params=params,
+        )
+
+    def search(self, query: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        meta = meta or {}
+        self.calls += 1
+        base_url = get_multimodal_api_base()
+        if not base_url:
+            self.errors += 1
+            return {
+                "results": [],
+                "message": "多模态知识库未配置（服务端未设置 MULTIMODAL_REMOTE_BASE_URL / MULTIMODAL_KB_API_BASE）",
+                "kb_id": None,
+                "kb_name": None,
+                "file_id": None,
+                "status": "disabled",
+            }
+
+        # C1.5：kbId 只来自用户显式选择或服务端配置默认库，不探测远端 kb/list。
+        raw_kb_id = (
+            meta.get("multimodal_kb_id")
+            or os.getenv("MULTIMODAL_KB_DEFAULT_KB_ID")
+            or os.getenv("MULTIMODAL_REMOTE_DEFAULT_KB_ID")
+        )
+        kb_name = meta.get("multimodal_kb_name")
+        if not raw_kb_id:
+            self.errors += 1
+            return {
+                "results": [],
+                "message": "未选择多模态知识库（请在知识问答页选择，或由服务端配置默认知识库）",
+                "kb_id": None,
+                "kb_name": kb_name,
+                "file_id": None,
+                "status": "no_kb_selected",
+            }
+        kb_id = _safe_identifier(raw_kb_id, "kbId")
+        if not kb_id:
+            # 用户/服务端提供了 kbId 但非法（绝对路径/URL/控制字符等）：拒绝，不网络请求
+            self.errors += 1
+            return {
+                "results": [],
+                "message": "多模态知识库 kbId 非法（已拒绝）",
+                "kb_id": None,
+                "kb_name": kb_name,
+                "file_id": None,
+                "status": "error",
+            }
+
+        query_text = str(query or "").strip()
+        if not query_text:
+            self.errors += 1
+            return {
+                "results": [],
+                "message": "检索 query 为空",
+                "kb_id": kb_id,
+                "kb_name": kb_name,
+                "file_id": None,
+                "status": "error",
+            }
+        if len(query_text) > 5000:
+            query_text = query_text[:5000]
+
+        trace_id = new_multimodal_trace_id()
+        headers = build_service_auth_headers(trace_id)
+
+        # 连接/读取超时与 top_k 只允许来自服务端配置；meta 只能提供经过校验的检索选择
+        timeout = _coerce_timeout(os.getenv("MULTIMODAL_KB_TIMEOUT") or os.getenv("MULTIMODAL_HTTP_READ_TIMEOUT"))
+        top_k = _clamp_top_k(meta.get("multimodal_top_k") or os.getenv("MULTIMODAL_KB_TOP_K"))
+
+        body: dict[str, Any] = {"kbId": kb_id, "query": query_text, "k": top_k}
+        file_id = _safe_identifier(meta.get("multimodal_file_id"), "fileId")
+        if file_id:
+            body["fileId"] = file_id
+
+        t0 = time.monotonic()
+        try:
+            response = self._request(
+                "POST", f"{base_url}/index/search",
+                headers=headers, timeout=timeout, max_retries=1, json=body,
+            )
+        except requests.RequestException as exc:
+            self.errors += 1
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            logger.error(format_redacted_upstream_error(trace_id, "index/search", None, elapsed_ms, type(exc).__name__))
+            return {
+                "results": [],
+                "message": "远端多模态检索失败（已记录，可重试）",
+                "kb_id": kb_id,
+                "kb_name": kb_name,
+                "file_id": file_id,
+                "status": "error",
+                "trace_id": trace_id,
+            }
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"message": response.text}
+
+        if not response.ok:
+            self.errors += 1
+            logger.error(format_redacted_upstream_error(trace_id, "index/search", response.status_code, elapsed_ms, "HTTPError"))
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error, dict):
+                error_code = error.get("code") or response.status_code
+                error_message = error.get("message") or response.text
+                message = f"{error_code}: {error_message}"
+            elif isinstance(payload, dict):
+                message = payload.get("message") or payload.get("detail") or response.text
+            else:
+                message = response.text
+
+            return {
+                "results": [],
+                "message": message,
+                "kb_id": kb_id,
+                "kb_name": kb_name,
+                "file_id": file_id,
+                "status": "error",
+                "trace_id": trace_id,
+            }
+
+        results = normalize_multimodal_results(payload, kb_id=kb_id)
+
+        return {
+            "results": results,
+            "message": payload.get("message") if isinstance(payload, dict) else "",
+            "kb_id": kb_id,
+            "kb_name": kb_name,
+            "file_id": file_id,
+            "status": "ok" if results else "empty",
+            "trace_id": trace_id,
+        }
+
+
+# 模块级单例：供检索器调用；测试可通过注入 session 或 patch
+# get_multimodal_sync_session 隔离远端。
+_MULTIMODAL_CLIENT = MultimodalRemoteClient()
 
 
 def search_multimodal_remote(query: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
-    meta = meta or {}
-    base_url = get_multimodal_api_base()
-    if not base_url:
-        return {
-            "results": [],
-            "message": "多模态知识库未配置（服务端未设置 MULTIMODAL_REMOTE_BASE_URL / MULTIMODAL_KB_API_BASE）",
-            "kb_id": None,
-            "kb_name": None,
-            "file_id": None,
-            "status": "disabled",
-        }
-
-    trace_id = new_multimodal_trace_id()
-    headers = build_service_auth_headers(trace_id)
-
-    # 连接/读取超时与 top_k 只允许来自服务端配置；meta 只能提供经过校验的检索选择
-    timeout = _coerce_timeout(os.getenv("MULTIMODAL_KB_TIMEOUT") or os.getenv("MULTIMODAL_HTTP_READ_TIMEOUT"))
-    top_k = _clamp_top_k(meta.get("multimodal_top_k") or os.getenv("MULTIMODAL_KB_TOP_K"))
-
-    kb_id = None
-    kb_name = meta.get("multimodal_kb_name")
-    try:
-        kb_id = _resolve_kb_id(base_url, meta, timeout, headers)
-    except requests.RequestException as exc:
-        logger.error(format_redacted_upstream_error(trace_id, "kb/list", None, 0.0, type(exc).__name__))
-        return {
-            "results": [],
-            "message": "远端多模态知识库列表不可用（可重试）",
-            "kb_id": None,
-            "kb_name": kb_name,
-            "file_id": None,
-            "status": "error",
-            "trace_id": trace_id,
-        }
-    if kb_id is None:
-        kb_name = kb_name or kb_id
-
-    if not kb_id:
-        return {
-            "results": [],
-            "message": "未配置多模态知识库 kbId，且远程 /kb/list 没有可用知识库",
-            "kb_id": None,
-            "kb_name": kb_name,
-            "file_id": None,
-            "status": "error",
-            "trace_id": trace_id,
-        }
-
-    query_text = str(query or "").strip()
-    if not query_text:
-        return {
-            "results": [],
-            "message": "检索 query 为空",
-            "kb_id": kb_id,
-            "kb_name": kb_name,
-            "file_id": None,
-            "status": "error",
-            "trace_id": trace_id,
-        }
-    if len(query_text) > 5000:
-        query_text = query_text[:5000]
-
-    body: dict[str, Any] = {"kbId": kb_id, "query": query_text, "k": top_k}
-    file_id = _safe_identifier(meta.get("multimodal_file_id"), "fileId")
-    if file_id:
-        body["fileId"] = file_id
-
-    t0 = time.monotonic()
-    try:
-        response = requests.post(
-            f"{base_url}/index/search", json=body, timeout=timeout, headers=headers
-        )
-    except requests.RequestException as exc:
-        elapsed_ms = (time.monotonic() - t0) * 1000.0
-        logger.error(format_redacted_upstream_error(trace_id, "index/search", None, elapsed_ms, type(exc).__name__))
-        return {
-            "results": [],
-            "message": "远端多模态检索失败（已记录，可重试）",
-            "kb_id": kb_id,
-            "kb_name": kb_name,
-            "file_id": file_id,
-            "status": "error",
-            "trace_id": trace_id,
-        }
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
-
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {"message": response.text}
-
-    if not response.ok:
-        logger.error(format_redacted_upstream_error(trace_id, "index/search", response.status_code, elapsed_ms, "HTTPError"))
-        error = payload.get("error") if isinstance(payload, dict) else None
-        if isinstance(error, dict):
-            error_code = error.get("code") or response.status_code
-            error_message = error.get("message") or response.text
-            message = f"{error_code}: {error_message}"
-        elif isinstance(payload, dict):
-            message = payload.get("message") or payload.get("detail") or response.text
-        else:
-            message = response.text
-
-        return {
-            "results": [],
-            "message": message,
-            "kb_id": kb_id,
-            "kb_name": kb_name,
-            "file_id": file_id,
-            "status": "error",
-            "trace_id": trace_id,
-        }
-
-    results = normalize_multimodal_results(payload, kb_id=kb_id)
-
-    return {
-        "results": results,
-        "message": payload.get("message") if isinstance(payload, dict) else "",
-        "kb_id": kb_id,
-        "kb_name": kb_name,
-        "file_id": file_id,
-        "status": "ok" if results else "empty",
-        "trace_id": trace_id,
-    }
+    """公开检索入口：委托共享客户端（保持既有调用方与测试 patch 面不变）。"""
+    return _MULTIMODAL_CLIENT.search(query, meta)
 
 
 # ---------------------------------------------------------------------------

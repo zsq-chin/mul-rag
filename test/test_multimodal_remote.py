@@ -254,8 +254,9 @@ class MultimodalRemoteTests(unittest.TestCase):
         {"MULTIMODAL_REMOTE_BASE_URL": "https://remote.example/api/v1"},
         clear=False,
     )
-    @patch("server.utils.multimodal_remote.requests.post")
-    def test_search_remote_preserves_kb_on_http_error(self, mock_post):
+    @patch("server.utils.multimodal_remote.get_multimodal_sync_session")
+    def test_search_remote_preserves_kb_on_http_error(self, mock_gs):
+        session = mock_gs.return_value
         response = Mock()
         response.ok = False
         response.status_code = 400
@@ -266,7 +267,7 @@ class MultimodalRemoteTests(unittest.TestCase):
             }
         }
         response.text = '{"error":{"code":"INDEX_NOT_FOUND","message":"请先构建索引"}}'
-        mock_post.return_value = response
+        session.post.return_value = response
 
         result = search_multimodal_remote(
             "井身结构示意图",
