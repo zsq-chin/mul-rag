@@ -499,7 +499,7 @@ const handleDocumentForGraphrag = async () => {
       // 调用后端接口处理文件
       const result = await graphApi.file_handle(filePath)
 
-      if (result.status === '处理成功') {    // 根据后端返回的 status
+      if (result.status === 'success') {    // H1：成功 200 + status=success；失败抛 4xx/5xx 进 catch
         console.log(`✅ 文件 ${filePath} 处理成功`)
       } else {
         console.warn(`❌ 文件 ${filePath} 处理失败`, result)

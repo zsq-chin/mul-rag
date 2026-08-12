@@ -5,7 +5,7 @@ import functools
 import traceback
 import httpx
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from fastapi import Response
 from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Body, Query, Header, Request
 from urllib.parse import quote
@@ -37,6 +37,10 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 GENERAL_UPLOAD_DIR = os.path.join(config.save_dir, "data", "uploads")
 
 TIANSHU_API_BASE = os.getenv("TIANSHU_API_BASE", "http://tianshu-backend:8000/api/v1")
+
+# /graph/handle 轮询参数：模块级常量，便于故障注入测试缩短超时
+GRAPH_FILE_HANDLE_TIMEOUT = 600
+GRAPH_FILE_HANDLE_POLL_INTERVAL = 5
 
 
 async def _run_blocking(func, *args, **kwargs):
@@ -296,19 +300,24 @@ async def get_graph_info(current_user: User = Depends(get_superadmin_user)):
     async with retrieval_gate:
         graph_info = await _run_blocking(graph_base.get_graph_info)
     if graph_info is None:
-        raise HTTPException(status_code=400, detail="图数据库获取出错")
+        raise HTTPException(status_code=503, detail="图数据库服务不可用")
     return graph_info
 
-@data.post("/graph/index-nodes")
-async def index_nodes(data: dict = Body(default={}), current_user: User = Depends(get_superadmin_user)):
-    # 获取参数或使用默认值
-    kgdb_name = data.get('kgdb_name', 'neo4j')
 
+class IndexNodesRequest(BaseModel):
+    """/graph/index-nodes 严格请求模型：拒绝未知字段。"""
+
+    kgdb_name: str = "neo4j"
+    model_config = ConfigDict(extra="forbid")
+
+
+@data.post("/graph/index-nodes")
+async def index_nodes(request: IndexNodesRequest, current_user: User = Depends(get_superadmin_user)):
     # 调用GraphDatabase的add_embedding_to_nodes方法
     async with graph_import_gate:
         if not await _run_blocking(graph_base.is_running):
-            raise HTTPException(status_code=400, detail="图数据库未启动")
-        count = await _run_blocking(graph_base.add_embedding_to_nodes, kgdb_name=kgdb_name)
+            raise HTTPException(status_code=503, detail="图数据库未启动")
+        count = await _run_blocking(graph_base.add_embedding_to_nodes, kgdb_name=request.kgdb_name)
 
     return {"status": "success", "message": f"已成功为{count}个节点添加嵌入向量", "indexed_count": count}
 
@@ -322,7 +331,7 @@ async def get_graph_node(entity_name: str, current_user: User = Depends(get_supe
 @data.get("/graph/nodes")
 async def get_graph_nodes(kgdb_name: str, num: int, current_user: User = Depends(get_superadmin_user)):
     if not config.enable_knowledge_graph:
-        raise HTTPException(status_code=400, detail="Knowledge graph is not enabled")
+        raise HTTPException(status_code=503, detail="Knowledge graph is not enabled")
 
     logger.debug(f"Get graph nodes in {kgdb_name} with {num} nodes")
     async with retrieval_gate:
@@ -330,51 +339,84 @@ async def get_graph_nodes(kgdb_name: str, num: int, current_user: User = Depends
         formatted = await _run_blocking(graph_base.format_general_results, result)
     return {"result": formatted, "message": "success"}
 
-@data.post("/graph/add-by-jsonl")
-async def add_graph_entity(file_path: str = Body(...), kgdb_name: str | None = Body(None), current_user: User = Depends(get_superadmin_user)):
-    if not config.enable_knowledge_graph:
-        return {"message": "知识图谱未启用", "status": "failed"}
+class AddGraphEntityRequest(BaseModel):
+    """/graph/add-by-jsonl 严格请求模型：拒绝未知字段。
 
+    file_path 只接受通用上传目录内的裸 file_id；绝对路径、盘符、UNC、目录
+    穿越与路径分隔符由 resolve_upload_path 拒绝（H1.3）。
+    """
+
+    file_path: str
+    kgdb_name: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+
+@data.post("/graph/add-by-jsonl")
+async def add_graph_entity(
+    request: AddGraphEntityRequest,
+    current_user: User = Depends(get_superadmin_user),
+):
+    """添加 JSONL/CSV 实体到知识图谱。
+
+    H1.1：图谱未启用、文件格式错误、UploadError、导入失败一律返回非 200 的
+    4xx/5xx，不再返回 HTTP 200 的 `status=failed` 字典。
+    """
+    if not config.enable_knowledge_graph:
+        raise HTTPException(status_code=503, detail="知识图谱未启用")
+
+    file_path = request.file_path
     if not file_path.endswith('.csv'):
-        return {"message": "文件格式错误，请上传 csv 文件", "status": "failed"}
+        raise HTTPException(status_code=400, detail="文件格式错误，请上传 csv 文件")
 
     # 只接受通用上传目录内的裸 file_id；绝对路径/盘符/UNC/穿越一律由解析器拒绝
     try:
         resolved_path = resolve_upload_path(GENERAL_UPLOAD_DIR, file_path)
     except UploadError as e:
-        return {"message": e.message, "status": "failed"}
+        raise HTTPException(status_code=e.status_code, detail=e.message) from e
 
     try:
         async with graph_import_gate:
-            await graph_base.jsonl_file_add_entity(resolved_path, kgdb_name)
+            await graph_base.jsonl_file_add_entity(resolved_path, request.kgdb_name)
         return {"message": "实体添加成功", "status": "success"}
     except Exception as e:
         logger.error(f"添加实体失败: {e}, {traceback.format_exc()}")
-        return {"message": f"添加实体失败: {e}", "status": "failed"}
-#处理文件
+        raise HTTPException(status_code=500, detail="添加实体失败") from e
+
+
+# 处理文件
 class FileHandleRequest(BaseModel):
+    """/graph/handle 严格请求模型：拒绝未知字段与路径型 file_path。"""
+
     file_path: str
+    model_config = ConfigDict(extra="forbid")
+
+
 @data.post("/graph/handle")
 async def graphfile_handle(request: FileHandleRequest, current_user: User = Depends(get_superadmin_user)):
-    """Submit a file to the external processing API and poll until completion."""
+    """Submit a file to the external processing API and poll until completion.
+
+    H1.2：提交失败、任务失败、上游连接失败返回 502；超时返回 504；
+    其他异常返回 500；成功保留 200。不再返回 200 的错误字典。
+    """
     file_path = request.file_path
     EXTERNAL_API_URL = f"{TIANSHU_API_BASE}/tasks/submit"
-    POLL_INTERVAL = 5
-    TIMEOUT = 600
     logger.debug(f"graphfile_handle: {file_path}")
     try:
         # 上传接口只回传 file_id（裸存储名），按通用上传目录安全解析；
         # 绝对路径/盘符/UNC/目录穿越一律由解析器拒绝
         input_file = Path(resolve_upload_path(GENERAL_UPLOAD_DIR, file_path))
         task_name = input_file.name
+    except UploadError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message) from e
 
+    try:
         loop = asyncio.get_running_loop()
         async with upstream_proxy_gate:
             result = await loop.run_in_executor(
                 executor, functools.partial(graph_base.file_Handle, input_file, EXTERNAL_API_URL)
             )
         if not result or "task_id" not in result:
-            return {"message": "文件提交失败", "detail": result}
+            raise HTTPException(status_code=502, detail="文件提交失败")
 
         task_id = result["task_id"]
         logger.info(f"graphfile_handle: task {task_id} submitted")
@@ -395,30 +437,36 @@ async def graphfile_handle(request: FileHandleRequest, current_user: User = Depe
                 return {
                     "task_name": task_name,
                     "message": "文件处理完成",
+                    "status": "success",
                     "task_id": task_id,
-                    "output_file": str(copied_file),
+                    # 只回传裸文件名，绝不把远端文件系统绝对路径暴露给浏览器
+                    "output_file": Path(copied_file).name,
                     "result": status_data.get("result"),
                 }
             elif status == "failed":
-                return {
-                    "task_name": task_name,
-                    "message": "文件处理失败",
-                    "task_id": task_id,
-                    "detail": status_data,
-                }
+                raise HTTPException(status_code=502, detail=f"文件处理失败（task={task_id}）")
 
-            if loop.time() - start_time > TIMEOUT:
-                return {
-                    "task_name": task_name,
-                    "status": "处理超时",
-                    "task_id": task_id,
-                }
+            if loop.time() - start_time > GRAPH_FILE_HANDLE_TIMEOUT:
+                raise HTTPException(status_code=504, detail=f"处理超时（task={task_id}）")
 
-            await asyncio.sleep(POLL_INTERVAL)
+            await asyncio.sleep(GRAPH_FILE_HANDLE_POLL_INTERVAL)
 
+    except httpx.TimeoutException as e:
+        logger.error(f"graphfile_handle timed out: {e}")
+        raise HTTPException(status_code=504, detail="图谱处理超时") from e
+    except httpx.ConnectError as e:
+        logger.error(f"graphfile_handle connect failed: {e}")
+        raise HTTPException(status_code=502, detail="图谱服务连接失败") from e
+    except httpx.HTTPStatusError as e:
+        logger.error(f"graphfile_handle upstream error: {e}")
+        raise HTTPException(
+            status_code=502, detail=f"图谱服务返回错误（{e.response.status_code}）"
+        ) from e
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"graphfile_handle failed: {e}")
-        return {"message": f"文件处理失败: {str(e)}"}
+        logger.error(f"graphfile_handle failed: {e}, {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="图谱处理失败") from e
 
 
 @data.post("/graph/build_graph")
