@@ -237,6 +237,44 @@ async def create_document_version_snapshot(
     return {"status": "success", "data": data, "message": "版本快照已创建"}
 
 
+@router.post("/blobs/gc")
+async def gc_version_blobs(
+    request: Request,
+    db: Session = Depends(get_db),
+    superadmin=Depends(get_superadmin_user),
+    min_age_seconds: float = Query(default=3600, ge=0),
+):
+    """手动清理无引用且超过安全时间的版本 blob（superadmin）。
+
+    H2.5：只删除超过安全时间且没有任何版本引用的 blob；默认 1 小时保护期保证
+    并发创建中的新 blob（刚发布、版本记录尚未提交）不被误删；请求级暂存目录
+    绝不触碰。返回 {"removed": n, "retained": m}。
+    """
+    try:
+        stats = governance_service.gc_unreferenced_blobs(db, min_age_seconds=min_age_seconds)
+    except governance_service.GovernanceError as e:
+        AuditService.record(
+            "knowledge.version.blob_gc",
+            user_id=superadmin.id,
+            resource_type="version_blob",
+            resource_id="",
+            status="failed",
+            detail={"min_age_seconds": min_age_seconds},
+            ip=request.client.host,
+        )
+        raise _to_http(e)
+    AuditService.record(
+        "knowledge.version.blob_gc",
+        user_id=superadmin.id,
+        resource_type="version_blob",
+        resource_id="",
+        status="success",
+        detail={"min_age_seconds": min_age_seconds, **stats},
+        ip=request.client.host,
+    )
+    return {"status": "success", "data": stats, "message": "版本 blob GC 完成"}
+
+
 @router.get("/databases/{db_id}/documents/{file_id}/versions/{version}/download")
 async def download_document_version(
     db_id: str,

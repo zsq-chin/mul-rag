@@ -5,9 +5,11 @@
 usage_count 服务端自增、JSON/XLSX 导出不含 path。
 """
 
+import hashlib
 import os
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import contextmanager
 from datetime import datetime
@@ -824,7 +826,12 @@ class GovernanceVersionTests(unittest.TestCase):
                 _restore_roots()
 
     def test_commit_generic_sqla_error_rolls_back_cleanly(self):
-        """P1-3：普通 SQLAlchemyError 提交失败 → 回滚、清理暂存、不留孤立文件。"""
+        """P1-3 + H2.2：普通 SQLAlchemyError 提交失败 → 回滚、不留版本记录。
+
+        提交在 blob 发布之后才发生（H2 blob-first），因此提交失败会留下一个
+        无引用的孤儿 blob——它可被 gc_unreferenced_blobs 清理，但绝不能留下
+        浏览器可见的版本记录（记录存在而文件不存在 = 断链）。
+        """
         with _temp_db() as (engine, session):
             with tempfile.TemporaryDirectory() as data_root:
                 _set_roots(data_root)
@@ -836,14 +843,168 @@ class GovernanceVersionTests(unittest.TestCase):
                     ):
                         with self.assertRaises(_SQAError):
                             governance_service.create_snapshot(session, "kb_test", "file_a")
-                    # 退出 patch 后：无版本记录、无孤儿 blob、会话可继续使用
+                    # 无版本记录（无断链），但磁盘留有可被 GC 清理的孤儿 blob
                     data = governance_service.list_versions(session, "kb_test", "file_a")
                     self.assertEqual(data["total"], 0, "提交失败不得留下版本记录")
-                    self.assertEqual(_blob_files(data_root), [], "提交失败不得留下孤儿 blob")
+                    orphan_blobs = _blob_files(data_root)
+                    self.assertEqual(len(orphan_blobs), 1, "提交失败允许留下 GC 可清理的孤儿 blob")
+                    # 会话未损坏，可继续正常创建 → blob 被版本记录引用
                     governance_service.create_snapshot(session, "kb_test", "file_a")
                     self.assertEqual(
                         governance_service.list_versions(session, "kb_test", "file_a")["total"], 1
                     )
+                    # 被引用的 blob 不能再被 GC 删除
+                    stats = governance_service.gc_unreferenced_blobs(session, min_age_seconds=0)
+                    self.assertEqual(stats["removed"], 0, "被版本引用的 blob 不得被 GC 删除")
+                    self.assertEqual(len(_blob_files(data_root)), 1)
+                finally:
+                    _restore_roots()
+
+
+def _write_orphan_blob(data_root, content, age_seconds):
+    """直接向内容寻址路径写入一个无版本引用的孤儿 blob（模拟发布成功但提交失败）。"""
+    sha = hashlib.sha256(content).hexdigest()
+    blob = governance_service._blob_path(sha)
+    os.makedirs(os.path.dirname(blob), exist_ok=True)
+    Path(blob).write_bytes(content)
+    old = time.time() - age_seconds
+    os.utime(blob, (old, old))
+    return sha
+
+
+class GovernanceVersionH2AtomicityTests(unittest.TestCase):
+    """H2：blob-first 原子发布 + 故障注入 + 安全 GC。
+
+    覆盖文档 §8 H2：
+    - H2.1/H2.3 发布失败 → 数据库无版本记录，不依赖第二次 DB 提交去删除；
+    - H2.4 发布失败且（模拟）清理/删除提交也失败 → 最终版本数仍为 0、无断链记录；
+    - H2.2 提交失败 → 允许留下 GC 可清理的孤儿 blob，但绝无版本记录存在而文件不存在；
+    - H2.5 GC 只删「超过安全时间且无版本引用」的 blob，保护并发创建中的新 blob，
+      且绝不触碰 _staging。
+    """
+
+    def test_publish_failure_no_version_record_no_cleanup_commit(self):
+        """H2.1/H2.3/H2.4：blob 发布失败 → 无版本记录；即便模拟清理/删除提交
+        也失败（session.delete 一调就抛），也不会有第二次 DB 提交可失败——
+        因为发布失败时版本记录根本尚未写入。"""
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    with (
+                        mock.patch.object(
+                            governance_service,
+                            "_publish_version_blob",
+                            side_effect=OSError("模拟发布失败（磁盘满）"),
+                        ),
+                        # 旧实现发布失败后靠 session.delete 做清理提交；新实现绝不该
+                        # 走到这一步。一旦走到，立即抛 AssertionError 使测试失败。
+                        mock.patch.object(
+                            session,
+                            "delete",
+                            side_effect=AssertionError("不应调用 session.delete 做清理"),
+                        ),
+                    ):
+                        with self.assertRaises(GovernanceError) as ctx:
+                            governance_service.create_snapshot(session, "kb_test", "file_a")
+                    self.assertIn("发布失败", str(ctx.exception))
+                    # 版本表为空，无断链记录
+                    self.assertEqual(
+                        session.query(KnowledgeDocumentVersion)
+                        .filter_by(db_id="kb_test", file_id="file_a")
+                        .count(),
+                        0,
+                    )
+                    data = governance_service.list_versions(session, "kb_test", "file_a")
+                    self.assertEqual(data["total"], 0)
+                    # 磁盘无已发布 blob、无暂存残留
+                    self.assertEqual(_blob_files(data_root), [])
+                finally:
+                    _restore_roots()
+
+    def test_commit_failure_leaves_orphan_blob_gc_recovers(self):
+        """H2.2：blob 已发布但版本记录提交失败 → 无版本记录、有孤儿 blob；
+        GC 可回收孤儿，被引用的 blob 不受影响。"""
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    with mock.patch.object(
+                        session, "commit", side_effect=_SQAError("模拟提交失败")
+                    ):
+                        with self.assertRaises(_SQAError):
+                            governance_service.create_snapshot(session, "kb_test", "file_a")
+                    self.assertEqual(
+                        session.query(KnowledgeDocumentVersion)
+                        .filter_by(db_id="kb_test", file_id="file_a")
+                        .count(),
+                        0,
+                        "提交失败不得留下版本记录",
+                    )
+                    orphan = _blob_files(data_root)
+                    self.assertEqual(len(orphan), 1, "提交失败应留下 1 个可 GC 的孤儿 blob")
+                    # 孤儿 blob 已超过安全时间 → GC 可回收
+                    os.utime(orphan[0], (time.time() - 7200, time.time() - 7200))
+                    stats = governance_service.gc_unreferenced_blobs(
+                        session, min_age_seconds=3600
+                    )
+                    self.assertEqual(stats["removed"], 1)
+                    self.assertEqual(_blob_files(data_root), [])
+                finally:
+                    _restore_roots()
+
+    def test_gc_removes_only_old_unreferenced_blobs_protects_recent(self):
+        """H2.5：GC 只删超过安全时间且无版本引用的 blob；被版本引用的与
+        保护期（并发创建中）的孤儿都保留。"""
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    v = governance_service.create_snapshot(session, "kb_test", "file_a")
+                    referenced_sha = v["sha256"]
+                    old_sha = _write_orphan_blob(data_root, b"orphan old", age_seconds=7200)
+                    recent_sha = _write_orphan_blob(data_root, b"orphan recent", age_seconds=60)
+                    self.assertEqual(len(_blob_files(data_root)), 3)
+                    stats = governance_service.gc_unreferenced_blobs(
+                        session, min_age_seconds=3600
+                    )
+                    self.assertEqual(stats["removed"], 1, "只应删旧的孤儿 blob")
+                    self.assertEqual(stats["retained"], 2, "引用 blob + 保护期孤儿保留")
+                    remaining = {
+                        os.path.basename(os.path.dirname(p)) for p in _blob_files(data_root)
+                    }
+                    self.assertIn(referenced_sha, remaining)
+                    self.assertIn(recent_sha, remaining)
+                    self.assertNotIn(old_sha, remaining)
+                    # 放宽安全时间（0 秒）后，保护期的孤儿也可回收，被引用 blob 仍保留
+                    stats = governance_service.gc_unreferenced_blobs(
+                        session, min_age_seconds=0
+                    )
+                    self.assertEqual(stats["removed"], 1)
+                    self.assertEqual(len(_blob_files(data_root)), 1)
+                finally:
+                    _restore_roots()
+
+    def test_gc_never_touches_staging(self):
+        """H2.5：GC 绝不触碰请求级暂存目录。"""
+        with _temp_db() as (engine, session):
+            with tempfile.TemporaryDirectory() as data_root:
+                _set_roots(data_root)
+                try:
+                    _seed(session, data_root)
+                    staging = governance_service._staging_root()
+                    os.makedirs(staging, exist_ok=True)
+                    tmp = os.path.join(staging, "file")
+                    Path(tmp).write_bytes(b"in-flight staging copy")
+                    os.utime(tmp, (time.time() - 7200, time.time() - 7200))
+                    stats = governance_service.gc_unreferenced_blobs(
+                        session, min_age_seconds=0
+                    )
+                    self.assertEqual(stats["removed"], 0)
+                    self.assertTrue(os.path.isfile(tmp), "GC 不得删除暂存中的请求文件")
                 finally:
                     _restore_roots()
 
@@ -886,6 +1047,15 @@ class GovernanceRouterSourceTests(unittest.TestCase):
     def test_audit_records_download_success_and_failure(self):
         self.assertIn("\"knowledge.download\"", self.src)
         self.assertGreaterEqual(self.src.count("\"knowledge.download\""), 2)
+
+    def test_blob_gc_endpoint_is_superadmin_only_and_safe(self):
+        """H2.5：手动 GC 端点仅 superadmin，调用安全的 gc_unreferenced_blobs，
+        带 1 小时默认保护期（Query ge=0），并记录审计。"""
+        self.assertIn("@router.post(\"/blobs/gc\")", self.src)
+        self.assertIn("gc_unreferenced_blobs(db, min_age_seconds=min_age_seconds)", self.src)
+        self.assertIn("min_age_seconds: float = Query(default=3600, ge=0)", self.src)
+        self.assertIn("get_superadmin_user", self.src)
+        self.assertIn("\"knowledge.version.blob_gc\"", self.src)
 
 
 if __name__ == "__main__":

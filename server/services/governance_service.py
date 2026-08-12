@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 
 from sqlalchemy import and_, func
@@ -591,8 +592,8 @@ def _staging_root() -> str:
 def _stage_version_tmp(source: str, sha256: str, size: int):
     """把源文件复制到请求级唯一暂存目录并校验 SHA/大小。
 
-    返回 (staging_dir, tmp_path)。发布（os.replace 到内容寻址路径）由调用方
-    在版本记录提交成功后才执行，因此提交失败绝不会留下孤儿 blob。
+    返回 (staging_dir, tmp_path)。调用方（create_snapshot）随后先原子发布 blob、
+    再提交版本记录；因此本函数只负责暂存校验，不负责发布。
     任何一步失败都清理本请求的暂存目录并抛错。
     """
     staging = _staging_root()
@@ -622,6 +623,77 @@ def _publish_version_blob(tmp: str, sha256: str) -> None:
     os.replace(tmp, final)
 
 
+def _referenced_blob_shas(session: Session) -> set:
+    """所有版本记录 metadata_snapshot 中引用的 blob_sha 集合（H2 GC 依据）。
+
+    只认格式合法（64 位十六进制）的 blob_sha；旧版按版本目录落盘的
+    _version_dir 方案不使用 _blobs 内容寻址路径，不受本 GC 影响。
+    """
+    shas = set()
+    for row in session.query(KnowledgeDocumentVersion).all():
+        try:
+            meta = json.loads(row.metadata_snapshot or "{}")
+        except (TypeError, ValueError):
+            continue
+        blob_sha = meta.get("blob_sha")
+        if isinstance(blob_sha, str) and len(blob_sha) == 64:
+            shas.add(blob_sha)
+    return shas
+
+
+def gc_unreferenced_blobs(session: Session, min_age_seconds: float = 3600) -> dict:
+    """定期/手动 GC：只删除「超过安全时间且无任何版本引用」的 blob。
+
+    H2.5 语义：
+    - 只删 _blobs/{sha[:2]}/{sha}/file，绝不触碰 _staging 暂存目录；
+    - 只删 mtime 早于 (now - min_age_seconds) 的无引用 blob，保证并发创建中
+      （blob 刚发布、版本记录尚未提交）的 blob 不会被误删；
+    - 同内容并发写同一 sha 路径且内容一致，删除幂等安全；
+    - 旧版 _version_dir 方案的文件不在 _blobs 下，天然不受影响。
+
+    返回 {"removed": n, "retained": m}。
+    """
+    referenced = _referenced_blob_shas(session)
+    blobs_root = _blobs_root()
+    removed = 0
+    retained = 0
+    cutoff = time.time() - min_age_seconds
+    if not os.path.isdir(blobs_root):
+        return {"removed": 0, "retained": 0}
+    for prefix in os.listdir(blobs_root):
+        if prefix == "_staging" or len(prefix) != 2:
+            continue
+        prefix_dir = os.path.join(blobs_root, prefix)
+        for sha in os.listdir(prefix_dir):
+            blob_file = os.path.join(prefix_dir, sha, "file")
+            if not os.path.isfile(blob_file):
+                continue
+            try:
+                mtime = os.path.getmtime(blob_file)
+            except OSError:
+                retained += 1
+                continue
+            if sha in referenced or mtime >= cutoff:
+                retained += 1
+                continue
+            try:
+                os.remove(blob_file)
+                removed += 1
+                for empty_dir in (os.path.dirname(blob_file), prefix_dir):
+                    try:
+                        os.rmdir(empty_dir)
+                    except OSError:
+                        pass
+            except OSError as exc:
+                logger.warning("blob GC 删除失败 %s: %s", blob_file, exc)
+                retained += 1
+    logger.info(
+        "blob GC 完成: removed=%d retained=%d referenced=%d",
+        removed, retained, len(referenced),
+    )
+    return {"removed": removed, "retained": retained}
+
+
 def _next_version_number(session: Session, db_id: str, file_id: str) -> int:
     """计算下一个版本号（latest + 1）。并发冲突由唯一约束 + 调用方重试兜底。"""
     latest = (
@@ -648,8 +720,11 @@ def create_snapshot(
     - 只复制本机源文件到受控版本目录，不修改 Milvus/知识节点/索引。
     - 版本文件按 SHA-256 内容寻址：同一内容只存一份 blob，版本记录只引用
       blob_sha；同内容并发创建写同一个路径且内容一致，互不删除。
-    - 顺序：暂存（请求级唯一目录）→ 提交版本记录 → 发布 blob（原子 os.replace）。
-      提交失败绝不发布，因此不会留下孤儿 blob；发布失败则删除刚提交的记录防断链。
+    - H2 blob-first 顺序：暂存（请求级唯一目录校验）→ 原子发布 blob
+      （os.replace 到内容寻址路径）→ 提交引用该 blob 的版本记录。
+      发布失败时版本记录尚未写入（不依赖第二次 DB 提交删除）；提交失败只留下
+      无引用的孤儿 blob（可由 gc_unreferenced_blobs 清理），绝不出现版本记录
+      存在但文件不存在（浏览器可见断链）。
     - 去重复用时必须确认既有 blob 内容校验一致，损坏的 blob 绝不能被引用。
     - 所有数据库异常都回滚并清理本请求创建的暂存资源，绝不删除其它请求的内容。
     - 版本号单调递增；并发创建通过唯一约束 + 重试保证不重号。
@@ -692,9 +767,18 @@ def create_snapshot(
     tmp = None
     row = None
     try:
-        # 新内容：先复制到请求级唯一暂存目录并校验，提交成功后才发布 blob
+        # H2 blob-first：新内容先在请求级唯一暂存目录校验，然后原子发布 blob，
+        # 最后才提交引用该 blob 的版本记录。
+        #  - 发布失败：版本记录尚未写入，直接抛错，不需要第二次 DB 提交去删除；
+        #  - 提交失败：blob 已发布，成为无引用的孤儿 blob，由 gc_unreferenced_blobs
+        #    清理，绝不出现版本记录存在但文件不存在（浏览器可见断链）。
         if not reused:
             staging, tmp = _stage_version_tmp(source, sha256, size)
+            try:
+                _publish_version_blob(tmp, sha256)
+            except Exception as exc:
+                logger.warning("版本 blob 发布失败 sha=%s: %s", sha256, exc)
+                raise GovernanceError("版本文件发布失败")
         for _attempt in range(6):
             version = _next_version_number(session, db_id, file_id)
             row = KnowledgeDocumentVersion(
@@ -712,44 +796,25 @@ def create_snapshot(
             try:
                 session.commit()
             except IntegrityError:
-                # 版本号冲突：回滚重试。暂存目录请求级唯一，清理不影响其它请求。
+                # 版本号冲突：回滚重试。blob 已发布且内容寻址一致，重试复用即可。
                 session.rollback()
                 row = None
                 continue
             break
         else:
             raise GovernanceError("版本号冲突，请重试")
-
-        if not reused:
-            try:
-                _publish_version_blob(tmp, sha256)
-            except Exception as exc:
-                # 发布失败：删除刚提交的版本记录，避免版本表出现断链
-                logger.warning("版本 %d blob 发布失败: %s", version, exc)
-                try:
-                    session.delete(row)
-                    session.commit()
-                except Exception:
-                    try:
-                        session.rollback()
-                    except Exception:
-                        pass
-                raise GovernanceError("版本文件发布失败")
         staging = None
         tmp = None
-    except GovernanceError:
+    except Exception as exc:
+        # 发布失败：版本记录尚未写入，回滚（无操作）后抛错即可（H2.3）。
+        # 提交失败：孤儿 blob 已发布，交给 GC 清理（H2.2），不回滚不删除其它内容。
         try:
             session.rollback()
         except Exception:
             pass
-        raise
-    except Exception:
-        # 所有其它数据库异常：回滚并清理本请求暂存资源，不留孤立文件
-        logger.warning("版本记录提交失败，已回滚并清理暂存资源")
-        try:
-            session.rollback()
-        except Exception:
-            pass
+        if isinstance(exc, GovernanceError):
+            raise
+        logger.warning("版本记录提交失败，已回滚；孤儿 blob 交由 GC 清理")
         raise
     finally:
         if staging:
