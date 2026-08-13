@@ -13,7 +13,7 @@
         title="回答不理想"
         @click="dislikeThisResponse(msg)"
       ><DislikeOutlined /></span>
-      <span v-if="msg.meta?.server_model_name" class="item" @click="console.log(msg)">
+      <span v-if="msg.meta?.server_model_name" class="item">
         <!-- <BulbOutlined /> {{ msg.meta.server_model_name }} -->
         <FireTwoTone twoToneColor="red"/> &nbsp;辽河油田图谱大模型
       </span>
@@ -239,7 +239,7 @@ const loadFeedback = async (m) => {
     }
   } catch (e) {
     // 404 等说明无记录，保持未评价状态；网络错误静默，不打断对话
-    console.debug('加载反馈状态失败', e)
+    console.error('加载反馈状态失败', e)
   } finally {
     st.loading = false
   }

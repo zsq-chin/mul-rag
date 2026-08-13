@@ -348,10 +348,7 @@ const groupedMultimodalResults = computed(() => {
 
 // 自动选择有数据的第一个标签页
 watch(() => props.visible, (newValue) => {
-  console.log('RefsSidebar visible changed to', newValue, 'activeTab is', activeTab.value);
-
   if (newValue) {
-    console.log('Checking which tabs are available');
     // 只有在activeTab无效的情况下才自动选择标签页
     const currentTabValid =
       (graphRetrievalEnabled.value && activeTab.value === 'graph' && hasGraphData.value) ||
@@ -361,35 +358,25 @@ watch(() => props.visible, (newValue) => {
       (activeTab.value === 'multiRound' && hasMultiRoundData.value);
 
     if (!currentTabValid) {
-      console.log('Current tab is invalid, finding first available tab');
       // 当前标签无效，需要寻找一个有效的标签
       if (graphRetrievalEnabled.value && hasGraphData.value) {
-        console.log('Selected graph tab');
         activeTab.value = 'graph';
       } else if (hasWebSearchData.value) {
-        console.log('Selected webSearch tab');
         activeTab.value = 'webSearch';
       } else if (knowledgeRetrievalEnabled.value && hasKnowledgeBaseData.value) {
-        console.log('Selected knowledgeBase tab');
         activeTab.value = 'knowledgeBase';
         // 打开第一个文件
         if (Object.keys(groupedKnowledgeResults.value).length > 0) {
           activeFiles.value = [Object.keys(groupedKnowledgeResults.value)[0]];
         }
       } else if (knowledgeRetrievalEnabled.value && hasMultimodalKnowledgeBaseData.value) {
-        console.log('Selected multimodalKnowledgeBase tab');
         activeTab.value = 'multimodalKnowledgeBase';
         if (Object.keys(groupedMultimodalResults.value).length > 0) {
           activeMultimodalFiles.value = [Object.keys(groupedMultimodalResults.value)[0]];
         }
       } else if (hasMultiRoundData.value) {
-        console.log('Selected multiRound tab');
         activeTab.value = 'multiRound';
-      } else {
-        console.log('No valid tabs available');
       }
-    } else {
-      console.log('Current tab is valid, keeping it:', activeTab.value);
     }
   }
 });
@@ -412,15 +399,6 @@ const formatDate = (timestamp) => {
 
 // 手动设置活动标签页
 const setActiveTab = (tab) => {
-  console.log('RefsSidebar setActiveTab called with tab:', tab);
-  console.log('Current tabs available:', {
-    graph: hasGraphData.value,
-    webSearch: hasWebSearchData.value,
-    knowledgeBase: hasKnowledgeBaseData.value,
-    multimodalKnowledgeBase: hasMultimodalKnowledgeBaseData.value
-  });
-  console.log('Full latestRefs structure:', JSON.stringify(props.latestRefs));
-
   // 如果要设置的标签是有效的，直接设置
   if (!graphRetrievalEnabled.value && tab === 'graph') {
     activeTab.value = 'webSearch'
@@ -432,29 +410,21 @@ const setActiveTab = (tab) => {
       (tab === 'knowledgeBase' && hasKnowledgeBaseData.value) ||
       (tab === 'multimodalKnowledgeBase' && hasMultimodalKnowledgeBaseData.value) ||
       (tab === 'multiRound' && hasMultiRoundData.value)) {
-    console.log('Setting activeTab to:', tab);
     activeTab.value = tab;
     if (tab === 'multimodalKnowledgeBase' && Object.keys(groupedMultimodalResults.value).length > 0) {
       activeMultimodalFiles.value = [Object.keys(groupedMultimodalResults.value)[0]];
     }
   } else {
-    console.warn(`Cannot set tab to ${tab}, tab is disabled or invalid`);
-
     // 如果特定标签数据不可用，但数据存在，尝试强制启用相应标签
     if (tab === 'webSearch' && props.latestRefs.web_search) {
-      console.log('Forcing webSearch tab even though hasWebSearchData is false');
       activeTab.value = 'webSearch';
     } else if (tab === 'knowledgeBase' && props.latestRefs.knowledge_base) {
-      console.log('Forcing knowledgeBase tab even though hasKnowledgeBaseData is false');
       activeTab.value = 'knowledgeBase';
     } else if (tab === 'multimodalKnowledgeBase' && props.latestRefs.multimodal_knowledge_base) {
-      console.log('Forcing multimodalKnowledgeBase tab even though hasMultimodalKnowledgeBaseData is false');
       activeTab.value = 'multimodalKnowledgeBase';
     } else if (tab === 'multiRound' && props.latestRefs.multi_round) {
-      console.log('Forcing multiRound tab even though hasMultiRoundData is false');
       activeTab.value = 'multiRound';
     } else if (tab === 'graph' && props.latestRefs.graph_base) {
-      console.log('Forcing graph tab even though hasGraphData is false');
       activeTab.value = 'graph';
     }
   }
@@ -470,7 +440,6 @@ watch(() => props.visible, (visible) => {
   // 根据当前活动标签页执行相应的刷新操作
   nextTick(() => {
     if (activeTab.value === 'graph' && hasGraphData.value) {
-      console.log('Refreshing graph after sidebar becomes visible');
       // 触发图表容器的重新布局
       if (graphContainerRef.value && graphContainerRef.value.refreshGraph) {
         graphContainerRef.value.refreshGraph();
@@ -490,20 +459,6 @@ watch(activeTab, (newTab) => {
     });
   }
 });
-
-// 监视latestRefs的变化，便于调试
-watch(() => props.latestRefs, (newRefs) => {
-  console.log('RefsSidebar latestRefs changed:', {
-    hasGraph: hasGraphData.value,
-    hasWeb: hasWebSearchData.value,
-    hasKB: hasKnowledgeBaseData.value,
-    hasMultimodalKB: hasMultimodalKnowledgeBaseData.value,
-    graph: newRefs.graph_base?.results?.nodes?.length,
-    web: newRefs.web_search?.results?.length,
-    kb: newRefs.knowledge_base?.results?.length,
-    multimodalKb: newRefs.multimodal_knowledge_base?.results?.length
-  });
-}, { deep: true });
 
 // 向父组件暴露方法
 defineExpose({

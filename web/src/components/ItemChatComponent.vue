@@ -157,9 +157,6 @@ const handleRefsPinChange = (pinned) => {
 
 // 处理打开refs侧边栏
 const handleOpenRefs = ({ type, refs }) => {
-  console.log('ChatComponent handleOpenRefs called with type:', type);
-  console.log('Refs data structure:', JSON.stringify(refs));
-
   // 先更新引用数据，确保数据在设置标签页之前已更新
   currentRefs.value = Object.assign({}, refs);
 
@@ -168,12 +165,8 @@ const handleOpenRefs = ({ type, refs }) => {
     // 显示抽屉
     refsSidebarVisible.value = true;
 
-    // 再次检查引用是否正确
-    console.log('Updated refs data:', JSON.stringify(currentRefs.value));
-
     // 根据type自动选择标签页
     if (refsSidebarRef.value) {
-      console.log('Setting active tab to:', type);
       // 延迟50毫秒设置标签页，确保抽屉已打开
       setTimeout(() => {
         refsSidebarRef.value.setActiveTab(type);
@@ -187,7 +180,6 @@ const handleOpenRefs = ({ type, refs }) => {
 // 添加对RefsSidebar的ref
 const refsSidebarRef = ref(null)
 
-const consoleMsg = (msg) => console.log(msg)
 onClickOutside(panel, () => setTimeout(() => opts.showPanel = false, 30))
 onClickOutside(modelCard, () => setTimeout(() => opts.showModelCard = false, 30))
 
@@ -211,9 +203,7 @@ const getHistory = () => {
 
 const useDatabase = (index) => {
   const selected = opts.databases[index]
-  console.log(selected)
   if (index != null && configStore.config.embed_model != selected.embed_model) {
-    console.log(selected.embed_model, configStore.config.embed_model)
     message.error(`所选知识库的向量模型（${selected.embed_model}）与当前向量模型（${configStore.config.embed_model}) 不匹配，请重新选择`)
   } else {
     meta.selectedKB = index
@@ -225,14 +215,16 @@ const handleKeyDown = (e) => {
     e.preventDefault()
     sendMessage()
   } else if (e.key === 'Enter' && e.shiftKey) {
-    // Insert a newline character at the current cursor position
+    // Insert a newline character at the current cursor position.
+    // inputText 是字符串而不是 ref：直接对字符串做切片替换（5.1.1 缺陷修复）。
     const textarea = e.target;
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
-    conv.value.inputText.value =
-      conv.value.inputText.value.substring(0, start) +
+    const newText =
+      conv.value.inputText.substring(0, start) +
       '\n' +
-      conv.value.inputText.value.substring(end);
+      conv.value.inputText.substring(end);
+    conv.value.inputText = newText;
     nextTick(() => {
       textarea.setSelectionRange(start + 1, start + 1);
     });
@@ -397,14 +389,12 @@ const groupRefs = (id) => {
 const loadDatabases = () => {
   // 由于这是管理功能，需要检查用户是否有管理权限
   if (!userStore.isAdmin) {
-    console.log('非管理员用户，跳过加载数据库列表');
     return;
   }
 
   try {
     knowledgeBaseApi.getDatabases()
       .then(data => {
-        console.log(data)
         opts.databases = data.databases
       })
       .catch(error => {
@@ -428,13 +418,30 @@ const fetchChatResponse = (user_input, cur_res_id) => {
   const controller = new AbortController();
   const signal = controller.signal;
 
+  // 5.3.5：客户端超时看门狗——模型流挂起时不无限 loading。
+  const STREAM_TIMEOUT_MS = 120000;
+  let timeoutHandle = setTimeout(() => {
+    controller.abort();
+    updateMessage({
+      id: cur_res_id,
+      status: 'error',
+      message: '请求超时，请重试',
+    });
+    isStreaming.value = false;
+  }, STREAM_TIMEOUT_MS);
+  const clearTimeoutHandle = () => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+  };
+
   const params = {
     query: user_input,
     history: getHistory().slice(0, -1), // 去掉最后一条刚添加的用户消息
     meta: meta,
     cur_res_id: cur_res_id,
   }
-  console.log(params)
 
   // 使用API函数发送请求
   chatApi.sendMessageWithAbort(params, signal)
@@ -465,15 +472,15 @@ const fetchChatResponse = (user_input, cur_res_id) => {
     const readChunk = () => {
       return reader.read().then(({ done, value }) => {
         if (done) {
+          clearTimeoutHandle();
+          stopWatch();
           const msg = conv.value.messages.find((msg) => msg.id === cur_res_id)
-          console.log(msg)
           groupRefs(cur_res_id);
           updateMessage({showThinking: "no", id: cur_res_id});
           // 更新全局refs为最新消息的refs
           if (msg && msg.refs) {
             // 深拷贝refs以确保不会出现引用问题
             currentRefs.value = JSON.parse(JSON.stringify(msg.refs));
-            console.log('Updated currentRefs on response completion:', currentRefs.value);
           }
           isStreaming.value = false;
           if (conv.value.messages.length === 2) { renameTitle(); }
@@ -516,8 +523,10 @@ const fetchChatResponse = (user_input, cur_res_id) => {
     readChunk();
   })
   .catch((error) => {
+    clearTimeoutHandle();
+    stopWatch();
     if (error.name === 'AbortError') {
-      console.log('Fetch aborted');
+      // 用户取消或超时看门狗中止：无需额外错误提示
     } else {
       console.error('聊天请求错误:', error);
 
@@ -535,8 +544,8 @@ const fetchChatResponse = (user_input, cur_res_id) => {
     isStreaming.value = false;
   });
 
-  // 监听 isStreaming 变化，当为 false 时中断请求
-  watch(isStreaming, (newValue) => {
+  // 监听 isStreaming 变化，当为 false 时中断请求；流结束/取消时解除 watcher。
+  const stopWatch = watch(isStreaming, (newValue) => {
     if (!newValue) {
       controller.abort();
     }
@@ -562,8 +571,6 @@ const sendMessage = () => {
     conv.value.inputText = '';
     meta.db_id = dbID;
     fetchChatResponse(user_input, cur_res_id)
-  } else {
-    console.log('请输入消息');
   }
 }
 
@@ -571,12 +578,10 @@ const retryMessage = (id) => {
   // 找到 id 对应的 message，然后删除包含 message 在内以及后面所有的 message
   const index = conv.value.messages.findIndex(msg => msg.id === id);
   const pastMessage = conv.value.messages[index-1]
-  console.log("retryMessage", id, pastMessage)
   conv.value.inputText = pastMessage.content
   if (index !== -1) {
     conv.value.messages = conv.value.messages.slice(0, index-1);
   }
-  console.log(conv.value.messages)
   sendMessage();
 }
 
@@ -597,19 +602,12 @@ onMounted(() => {
     });
   }
 
-  console.log(conv.value.messages)
-
   // 从本地存储加载数据
   const storedMeta = localStorage.getItem('meta');
   if (storedMeta) {
     const parsedMeta = JSON.parse(storedMeta);
     Object.assign(meta, parsedMeta);
   }
-
-  // 检查refsSidebarRef是否正确挂载
-  nextTick(() => {
-    console.log('Is refsSidebarRef mounted?', !!refsSidebarRef.value);
-  });
 });
 
 onUnmounted(() => {
