@@ -163,10 +163,15 @@ def update_user_model(db, user, model_id: int, payload, cipher: CredentialCipher
     if "api_base" in changes:
         model.api_base = validate_api_base(changes["api_base"])
     if "api_key" in changes and changes["api_key"] is not None:
-        cipher = cipher or CredentialCipher()
         api_key = _secret_value(changes["api_key"])
-        model.encrypted_api_key = cipher.encrypt(api_key)
-        model.key_hint = api_key[-4:]
+        if not api_key:
+            # 6.2.4：编辑时 Key 留空（空串）表示保留现有密钥——不覆盖、不清空。
+            # 此前空串会走到 cipher.encrypt("") 抛 ValueError（400），破坏"留空保留"契约。
+            pass
+        else:
+            cipher = cipher or CredentialCipher()
+            model.encrypted_api_key = cipher.encrypt(api_key)
+            model.key_hint = api_key[-4:]
 
     try:
         db.commit()

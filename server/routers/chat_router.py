@@ -51,6 +51,7 @@ from server.utils.stream_sanitizer import (
     complete_related_questions,
     parse_related_questions,
 )
+from server.utils.meta_sanitizer import redact_meta_for_log
 
 chat = APIRouter(prefix="/chat")
 
@@ -355,7 +356,7 @@ async def chat_post(
     model = resolve_model_for_user(db, current_user, meta)
     meta["server_model_name"] = model.model_name
     history_manager = HistoryManager(history, system_prompt=meta.get("system_prompt"))
-    logger.debug(f"Received query: {query} with meta: {meta}")
+    logger.debug(f"Received query: {query} with meta: {redact_meta_for_log(meta)}")
 
     # 构造一条 JSON 格式的数据块（chunk），并编码成 字节串，末尾再加上一个换行符 b"\n"用于 流式响应
     # 形如：
