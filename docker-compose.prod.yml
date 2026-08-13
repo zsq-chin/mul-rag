@@ -38,10 +38,12 @@ services:
       - RUNNING_IN_DOCKER=true
       # I2.1：生产 SQLite 与基础 Compose 一致，落在命名卷 /app/db。
       - SAGE_DB_PATH=/app/db/server.db
-      # I1.1/I1.3：生产显式 remote 模式；Base URL 必须显式配置，禁止私网 IP 静默默认值。
-      - MULTIMODAL_ENABLED=${MULTIMODAL_ENABLED:?Set MULTIMODAL_ENABLED}
+      # I1.1/I1.3/4.1.3：多模态是可选依赖。MULTIMODAL_ENABLED 未设置/为空默认关闭，
+      # 不得无条件要求 MULTIMODAL_KB_API_BASE（否则多模态关闭时整个生产 stack 无法启动）。
+      # 运行时由 is_multimodal_enabled/get_multimodal_api_base 判定未启用即不读取远端地址。
+      - MULTIMODAL_ENABLED=${MULTIMODAL_ENABLED:-false}
       - MULTIMODAL_MODE=remote
-      - MULTIMODAL_KB_API_BASE=${MULTIMODAL_KB_API_BASE:?Set MULTIMODAL_KB_API_BASE}
+      - MULTIMODAL_KB_API_BASE=${MULTIMODAL_KB_API_BASE:-}
       - MULTIMODAL_KB_DEFAULT_KB_ID=${MULTIMODAL_KB_DEFAULT_KB_ID:-}
       - MULTIMODAL_KB_TIMEOUT=${MULTIMODAL_KB_TIMEOUT:-30}
       - MULTIMODAL_KB_TOP_K=${MULTIMODAL_KB_TOP_K:-5}

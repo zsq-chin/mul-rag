@@ -124,19 +124,19 @@ def get_multimodal_mode() -> str:
 
 
 def is_multimodal_enabled() -> bool:
-    """多模态显式开关（I1.1）。
+    """多模态显式开关（I1.1 / 4.1.1）。
 
     - 显式 true/1/yes/on → 启用；
     - 显式 false/0/no/off → 禁用；
-    - 未设置/为空 → 向后兼容：配置了模式或 Base URL 即视为启用（保持此前
-      “配置 Base URL 即启用”的语义）。
+    - 未设置/为空 → 默认关闭（远端多模态是可选依赖，未显式启用即视为关闭，
+      不得无条件解释为 True）。
     """
     raw = (os.getenv("MULTIMODAL_ENABLED") or "").strip().lower()
     if raw in ("1", "true", "yes", "on"):
         return True
     if raw in ("0", "false", "no", "off"):
         return False
-    return True
+    return False
 
 
 def _local_multimodal_base_url() -> str:

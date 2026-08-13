@@ -9,6 +9,18 @@ export const useUserStore = defineStore('user', () => {
   const userRole = ref(localStorage.getItem('user_role') || '')
   let hydrated = false
 
+  // 安全读取响应体 JSON：空响应/非 JSON/5xx 均不抛 JSON 解析异常（4.2.1）。
+  // 任何调用方都应先检查 response.ok，再使用本函数解析。
+  async function safeParseJson(response, fallback = null) {
+    try {
+      const text = await response.text()
+      if (!text) return fallback
+      return JSON.parse(text)
+    } catch (e) {
+      return fallback
+    }
+  }
+
   // 计算属性
   const isLoggedIn = computed(() => !!token.value)
   const isAdmin = computed(() => userRole.value === 'admin' || userRole.value === 'superadmin')
@@ -27,11 +39,14 @@ export const useUserStore = defineStore('user', () => {
       })
 
       if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.detail || '登录失败')
+        const error = await safeParseJson(response, {})
+        throw new Error(error.detail || `登录失败（HTTP ${response.status}）`)
       }
 
-      const data = await response.json()
+      const data = await safeParseJson(response, null)
+      if (!data || !data.access_token) {
+        throw new Error('服务端返回异常，请稍后重试')
+      }
 
       // 更新状态
       token.value = data.access_token
@@ -107,7 +122,6 @@ export const useUserStore = defineStore('user', () => {
 
   // 本地登出清理函数
   function performLocalLogout() {
-    console.log('Performing local logout cleanup')
     // 清除状态
     token.value = ''
     userId.value = null
@@ -138,11 +152,14 @@ export const useUserStore = defineStore('user', () => {
       })
 
       if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.detail || '初始化管理员失败')
+        const error = await safeParseJson(response, {})
+        throw new Error(error.detail || `初始化管理员失败（HTTP ${response.status}）`)
       }
 
-      const data = await response.json()
+      const data = await safeParseJson(response, null)
+      if (!data || !data.access_token) {
+        throw new Error('服务端返回异常，请稍后重试')
+      }
 
       // 更新状态
       token.value = data.access_token
@@ -165,13 +182,17 @@ export const useUserStore = defineStore('user', () => {
   }
 
   async function checkFirstRun() {
+    // 4.2.1：空响应/非 JSON/5xx 不得抛 JSON 解析异常；失败向上抛出，由页面展示重试。
     try {
       const response = await fetch('/api/auth/check-first-run')
-      const data = await response.json()
-      return data.first_run
+      if (!response.ok) {
+        throw new Error(`检查首次运行状态失败（HTTP ${response.status}）`)
+      }
+      const data = await safeParseJson(response, {})
+      return !!data.first_run
     } catch (error) {
       console.error('检查首次运行状态错误:', error)
-      return false
+      throw error
     }
   }
 
@@ -284,7 +305,6 @@ export const useUserStore = defineStore('user', () => {
           ...getAuthHeaders()
         }
       })
-      console.log('deleteUser response:', response.ok)
       if (!response.ok) {
         const error = await response.json()
         throw new Error(error.detail || '删除用户失败')

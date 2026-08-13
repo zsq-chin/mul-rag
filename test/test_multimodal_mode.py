@@ -36,10 +36,18 @@ class MultimodalModeTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"MULTIMODAL_ENABLED": falsy}, clear=True):
                 self.assertFalse(mm.is_multimodal_enabled(), falsy)
 
-    def test_enabled_backward_compat_when_unset(self):
-        # 未显式设置 → 向后兼容视为启用（由 base/mode 决定是否生效）
+    def test_disabled_when_unset_defaults_off(self):
+        # 4.1.1：未设置/为空 → 默认关闭，不得无条件解释为 True
         with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertTrue(mm.is_multimodal_enabled())
+            self.assertFalse(mm.is_multimodal_enabled())
+        with mock.patch.dict(os.environ, {"MULTIMODAL_ENABLED": ""}, clear=True):
+            self.assertFalse(mm.is_multimodal_enabled())
+
+    def test_unset_enabled_returns_none_even_with_base(self):
+        # 4.1.1/4.1.2：未显式启用时即使配置了 Base URL 也不读取/校验/连接远端
+        env = {"MULTIMODAL_KB_API_BASE": "https://mm.example.com/api/v1"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(mm.get_multimodal_api_base())
 
     def test_remote_mode_uses_env_base(self):
         env = {

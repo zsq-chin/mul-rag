@@ -127,6 +127,14 @@ services:
       mysql:
         condition: service_healthy
     command: uv run uvicorn server.main:app --host 0.0.0.0 --port 5050 --reload
+    # 4.1.6：有效健康检查——应用子进程退出时容器不得继续显示虚假的健康状态。
+    # 直接探测 /api/health；进程死亡/端口关闭时 urllib 抛异常 → 容器标记 unhealthy。
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5050/api/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   web:

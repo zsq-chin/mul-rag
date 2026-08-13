@@ -9,7 +9,7 @@
           <div class="alert-title">服务端连接失败</div>
           <div class="alert-message">{{ serverError }}</div>
         </div>
-        <a-button type="link" size="small" @click="checkServerHealth" :loading="healthChecking">
+        <a-button type="link" size="small" @click="retryConnection" :loading="healthChecking">
           重试
         </a-button>
       </div>
@@ -271,8 +271,11 @@ const checkFirstRunStatus = async () => {
     const isFirst = await userStore.checkFirstRun();
     isFirstRun.value = isFirst;
   } catch (error) {
+    // 4.2.2：首启接口失败时显示清晰错误 + 重试按钮，不打印后端堆栈
     console.error('检查首次运行状态失败:', error);
-    errorMessage.value = '系统出错，请稍后重试';
+    serverStatus.value = 'error';
+    serverError.value = error.message || '无法获取系统初始化状态，请检查服务端';
+    errorMessage.value = error.message || '系统出错，请稍后重试';
   } finally {
     loading.value = false;
   }
@@ -295,6 +298,21 @@ const checkServerHealth = async () => {
     serverError.value = error.message || '无法连接到服务端，请检查网络连接';
   } finally {
     healthChecking.value = false;
+  }
+};
+
+// 4.2.3：服务恢复后重试即可继续登录，不需要刷新整个浏览器。
+// 同时恢复健康检查与首次运行检查。
+const retryConnection = async () => {
+  try {
+    await checkServerHealth();
+    if (serverStatus.value === 'ok') {
+      await checkFirstRunStatus();
+    }
+  } catch (error) {
+    console.error('重试连接失败:', error);
+    serverStatus.value = 'error';
+    serverError.value = error.message || '无法连接到服务端，请检查网络连接';
   }
 };
 

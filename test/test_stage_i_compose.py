@@ -154,14 +154,31 @@ class ComposeConfigMultimodalTests(unittest.TestCase):
         self.assertIn("MULTIMODAL_MODE: remote", self.prod_out)
         self.assertIn("MULTIMODAL_ENABLED: \"true\"", self.prod_out)
 
-    def test_prod_base_url_must_be_explicit(self):
-        """I1.3：生产缺 MULTIMODAL_KB_API_BASE 时渲染必须失败。"""
+    def test_prod_multimodal_disabled_renders_without_base_url(self):
+        """4.1.3：多模态关闭时生产配置必须能渲染，不得无条件要求 MULTIMODAL_KB_API_BASE。"""
         r = _compose_config(
             ROOT / "docker-compose.yml", ROOT / "docker-compose.prod.yml",
-            env={**_BASE_REQUIRED_ENV, "MULTIMODAL_ENABLED": "true"},
+            env={**_BASE_REQUIRED_ENV, "MULTIMODAL_ENABLED": "false"},
         )
-        self.assertNotEqual(r.returncode, 0, "缺 MULTIMODAL_KB_API_BASE 时生产配置不应渲染成功")
-        self.assertIn("MULTIMODAL_KB_API_BASE", r.stderr)
+        self.assertEqual(r.returncode, 0, f"多模态关闭时生产配置应能渲染: {r.stderr}")
+        self.assertIn('MULTIMODAL_ENABLED: "false"', r.stdout)
+        self.assertIn('MULTIMODAL_KB_API_BASE: ""', r.stdout)
+
+    def test_prod_defaults_disabled_without_multimodal_env(self):
+        """4.1.3：完全不注入 MULTIMODAL 变量时生产配置仍可渲染（默认关闭，不再被 :? 卡死）。"""
+        r = _compose_config(
+            ROOT / "docker-compose.yml", ROOT / "docker-compose.prod.yml",
+            env={**_BASE_REQUIRED_ENV},
+        )
+        self.assertEqual(r.returncode, 0, f"缺 MULTIMODAL 变量时生产配置不应失败: {r.stderr}")
+        self.assertIn('MULTIMODAL_ENABLED: "false"', r.stdout)
+        self.assertIn('MULTIMODAL_KB_API_BASE: ""', r.stdout)
+
+    def test_base_api_has_effective_healthcheck(self):
+        """4.1.6：基础 Compose 的 api 服务必须有有效健康检查，探测 /api/health。"""
+        api = self.base_out.split("  api:\n", 1)[1].split("\n  web:", 1)[0]
+        self.assertIn("healthcheck:", api)
+        self.assertIn("urllib.request.urlopen('http://127.0.0.1:5050/api/health')", api)
 
     def test_prod_api_daemon_no_reload_with_grace_logrotate_limits(self):
         """I3.1/I3.2：生产 API 无 reload；健康检查/停止宽限/日志轮转/资源限制/重启策略齐备。"""
