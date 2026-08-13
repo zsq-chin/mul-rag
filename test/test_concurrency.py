@@ -1,7 +1,14 @@
 import ast
 import asyncio
+import importlib.util
+import os
+import sys
+import tempfile
+import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -11,6 +18,95 @@ from server.services.concurrency import BoundedGate
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _install_chat_src_shim() -> None:
+    """让被测路由可在无 Milvus/Neo4j/MySQL 的主机导入（同 test_chat_stream_route）。
+
+    server.routers 包 __init__ 会连锁导入 college_router → db_manager_college
+    （要求 MYSQL_PASSWORD）以及真实 src → KnowledgeBase（Milvus ConnectionError），
+    因此直接 spec 加载单个路由文件，并用轻量 src 桩满足其 import 期名称。
+    """
+    if "src" in sys.modules and getattr(sys.modules["src"], "_sage_chat_shim", False):
+        return
+
+    class _StubLogger:
+        def info(self, *args, **kwargs): pass
+        def error(self, *args, **kwargs): pass
+        def warning(self, *args, **kwargs): pass
+        def debug(self, *args, **kwargs): pass
+
+    save_dir = tempfile.mkdtemp(prefix="sage-test-save-")
+    src = types.ModuleType("src")
+    src.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="test-blocking")
+    src.config = types.SimpleNamespace(
+        save_dir=save_dir,
+        default_agent_id="default",
+        model_names=[],
+        save=lambda *args, **kwargs: None,
+        _save_models_to_file=lambda *args, **kwargs: None,
+        get=lambda key, default=None: default,
+    )
+    src.retriever = types.SimpleNamespace()
+    src.knowledge_base = types.SimpleNamespace()
+    src.graph_base = types.SimpleNamespace(close=lambda: None)
+    src.shutdown_runtime = lambda: None
+    src._sage_chat_shim = True
+    sys.modules["src"] = src
+
+    utils = types.ModuleType("src.utils")
+    utils.logger = _StubLogger()
+    sys.modules["src.utils"] = utils
+    logging_config = types.ModuleType("src.utils.logging_config")
+    logging_config.logger = _StubLogger()
+    sys.modules["src.utils.logging_config"] = logging_config
+    prompts = types.ModuleType("src.utils.prompts")
+    prompts.get_system_prompt = lambda *args, **kwargs: None
+    sys.modules["src.utils.prompts"] = prompts
+
+    history_spec = importlib.util.spec_from_file_location(
+        "src.core.history", ROOT / "src" / "core" / "history.py"
+    )
+    history_mod = importlib.util.module_from_spec(history_spec)
+    sys.modules["src.core.history"] = history_mod
+    history_spec.loader.exec_module(history_mod)
+    core = types.ModuleType("src.core")
+    core.HistoryManager = history_mod.HistoryManager
+    sys.modules["src.core"] = core
+
+    agents = types.ModuleType("src.agents")
+    agents.agent_manager = types.SimpleNamespace()
+    sys.modules["src.agents"] = agents
+    tools_factory = types.ModuleType("src.agents.tools_factory")
+    tools_factory.get_all_tools = lambda *args, **kwargs: []
+    sys.modules["src.agents.tools_factory"] = tools_factory
+    models = types.ModuleType("src.models")
+    models.select_model = lambda *args, **kwargs: None
+    sys.modules["src.models"] = models
+
+    os.environ["SAGE_DB_PATH"] = os.path.join(
+        tempfile.mkdtemp(prefix="sage-test-db-"), "srv.db"
+    )
+
+
+_install_chat_src_shim()
+
+
+def _spec_load(module_name: str, relative_path: str):
+    spec = importlib.util.spec_from_file_location(
+        module_name, ROOT / relative_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+chat_router = _spec_load("chat_router_under_test", "server/routers/chat_router.py")
+multimodal_proxy_router = _spec_load(
+    "multimodal_proxy_router_under_test", "server/routers/multimodal_proxy_router.py"
+)
+data_router = _spec_load("data_router_under_test", "server/routers/data_router.py")
 
 
 class ConcurrencyTests(unittest.IsolatedAsyncioTestCase):
@@ -51,12 +147,12 @@ class ConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
 class StreamingGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_image_proxy_holds_gate_until_stream_finishes(self):
-        from server.routers import chat_router
 
         gate = BoundedGate("image-stream", limit=1, acquire_timeout=0.1)
 
         class FakeResponse:
             status_code = 200
+            is_redirect = False
             headers = {"content-type": "image/png"}
 
             def __init__(self):
@@ -100,12 +196,12 @@ class StreamingGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate.in_use, 0)
 
     async def test_image_proxy_releases_gate_when_stream_is_cancelled(self):
-        from server.routers import chat_router
 
         gate = BoundedGate("image-stream", limit=1, acquire_timeout=0.1)
 
         class FakeResponse:
             status_code = 200
+            is_redirect = False
             headers = {"content-type": "image/png"}
 
             def __init__(self):
@@ -146,9 +242,9 @@ class StreamingGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.closed)
         self.assertEqual(gate.in_use, 0)
 
-    async def test_generic_proxy_releases_gate_when_request_build_fails(self):
-        from server.routers import multimodal_proxy_router
-
+    async def test_proxy_stream_releases_gates_when_request_build_fails(self):
+        # Stage J（B3）后不再有 proxy_multimodal_request 通配入口；构建/发送/释放
+        # 边界收敛在 _proxy_stream（_Gates = category gate + upstream_proxy_gate）。
         gate = BoundedGate("generic-proxy", limit=1, acquire_timeout=0.1)
 
         class FakeQueryParams:
@@ -168,6 +264,11 @@ class StreamingGateTests(unittest.IsolatedAsyncioTestCase):
             def build_request(self, *args, **kwargs):
                 raise ValueError("invalid upstream request")
 
+        spec = SimpleNamespace(
+            method="GET",
+            path="kb/list",
+            body=multimodal_proxy_router.BODY_NONE,
+        )
         with (
             patch.object(multimodal_proxy_router, "upstream_proxy_gate", gate),
             patch.object(
@@ -175,23 +276,21 @@ class StreamingGateTests(unittest.IsolatedAsyncioTestCase):
                 "get_multimodal_client",
                 return_value=FakeClient(),
             ),
-            patch.object(
-                multimodal_proxy_router,
-                "get_multimodal_api_base",
-                return_value="http://upstream",
-            ),
         ):
-            with self.assertRaises(Exception):
-                await multimodal_proxy_router.proxy_multimodal_request(
-                    path="kb/list",
+            with self.assertRaises(HTTPException) as ctx:
+                await multimodal_proxy_router._proxy_stream(
                     request=FakeRequest(),
-                    current_user=object(),
+                    remote_url="http://upstream/kb/list",
+                    spec=spec,
+                    headers={},
+                    trace_id="test-trace",
+                    timeout=object(),
                 )
+            self.assertEqual(ctx.exception.status_code, 502)
 
         self.assertEqual(gate.in_use, 0)
 
     async def test_graph_download_does_not_buffer_before_streaming(self):
-        from server.routers import data_router
 
         gate = BoundedGate("graph-download", limit=1, acquire_timeout=0.1)
 
@@ -241,7 +340,6 @@ class StreamingGateTests(unittest.IsolatedAsyncioTestCase):
 
 class CancellationTests(unittest.IsolatedAsyncioTestCase):
     async def test_get_multimodal_image_build_request_runtime_error_releases_gate(self):
-        from server.routers import chat_router
 
         gate = BoundedGate("image-cancel-build", limit=1, acquire_timeout=0.1)
 
@@ -266,7 +364,6 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate.in_use, 0)
 
     async def test_get_multimodal_image_send_cancelled_releases_gate(self):
-        from server.routers import chat_router
 
         gate = BoundedGate("image-cancel-send", limit=1, acquire_timeout=0.1)
 
@@ -292,9 +389,8 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(gate.in_use, 0)
 
-    async def test_proxy_multimodal_request_send_cancelled_releases_gate(self):
-        from server.routers import multimodal_proxy_router
-
+    async def test_proxy_stream_send_cancelled_releases_gates(self):
+        # Stage J（B3）后白名单入口由 _proxy_stream 统一持有 _Gates，取消必须释放。
         gate = BoundedGate("generic-cancel", limit=1, acquire_timeout=0.1)
 
         class FakeQueryParams:
@@ -317,6 +413,11 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
             async def send(self, request, stream):
                 raise asyncio.CancelledError()
 
+        spec = SimpleNamespace(
+            method="GET",
+            path="kb/list",
+            body=multimodal_proxy_router.BODY_NONE,
+        )
         with (
             patch.object(multimodal_proxy_router, "upstream_proxy_gate", gate),
             patch.object(
@@ -324,23 +425,20 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
                 "get_multimodal_client",
                 return_value=FakeClient(),
             ),
-            patch.object(
-                multimodal_proxy_router,
-                "get_multimodal_api_base",
-                return_value="http://upstream",
-            ),
         ):
             with self.assertRaises(asyncio.CancelledError):
-                await multimodal_proxy_router.proxy_multimodal_request(
-                    path="kb/list",
+                await multimodal_proxy_router._proxy_stream(
                     request=FakeRequest(),
-                    current_user=object(),
+                    remote_url="http://upstream/kb/list",
+                    spec=spec,
+                    headers={},
+                    trace_id="test-trace",
+                    timeout=object(),
                 )
 
         self.assertEqual(gate.in_use, 0)
 
     async def test_api_download_file_send_cancelled_releases_gate(self):
-        from server.routers import data_router
 
         gate = BoundedGate("download-cancel", limit=1, acquire_timeout=0.1)
 
@@ -463,7 +561,11 @@ class RuntimeWiringTests(unittest.TestCase):
         self.assertIn("async with retrieval_gate", data_source)
         self.assertIn("async with graph_import_gate", data_source)
         self.assertIn("async with upstream_proxy_gate", data_source)
-        self.assertIn("async with upstream_proxy_gate", multimodal_source)
+        self.assertIn(
+            "self._gates = (category_gate(category), upstream_proxy_gate)",
+            multimodal_source,
+        )
+        self.assertIn("await self._gates[1].__aenter__()", multimodal_source)
 
     def test_question_normalization_removes_curly_quotes_and_period(self):
         """process_question_stats must strip straight, left, and right

@@ -13,10 +13,43 @@
 
 import json
 import os
+import sys
+import types
 import unittest
 from unittest.mock import Mock, patch
 
 import requests
+
+
+def _install_src_shim() -> None:
+    """让 server.utils.multimodal_remote 可在无 Milvus/Neo4j/MySQL 的主机导入。
+
+    multimodal_remote 模块级 ``from src.utils.logging_config import logger`` 会触发
+    真实 src/__init__.py（实例化 KnowledgeBase → Milvus 连接失败），既拖慢测试，
+    又在 runner 输出里留下 Milvus 错误标记（这些模块曾被误判为 env-missing，掩盖了
+    真实断言失败）。这里用最小 src 桩屏蔽真实 src；被测逻辑仍是真实 multimodal_remote。
+    """
+    if "src" in sys.modules and getattr(sys.modules["src"], "_sage_multimodal_shim", False):
+        return
+
+    class _StubLogger:
+        def info(self, *args, **kwargs): pass
+        def error(self, *args, **kwargs): pass
+        def warning(self, *args, **kwargs): pass
+        def debug(self, *args, **kwargs): pass
+
+    src = types.ModuleType("src")
+    src._sage_multimodal_shim = True
+    sys.modules["src"] = src
+    utils = types.ModuleType("src.utils")
+    utils.logger = _StubLogger()
+    sys.modules["src.utils"] = utils
+    logging_config = types.ModuleType("src.utils.logging_config")
+    logging_config.logger = _StubLogger()
+    sys.modules["src.utils.logging_config"] = logging_config
+
+
+_install_src_shim()
 
 from server.services.http_clients import (
     close_multimodal_sync_session,
@@ -146,7 +179,7 @@ class ShutdownReleaseTests(unittest.TestCase):
 
 class RetryPolicyTests(unittest.TestCase):
     def _env(self, **extra):
-        env = {"MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE}
+        env = {"MULTIMODAL_ENABLED": "true", "MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE}
         env.update(extra)
         return patch.dict(os.environ, env, clear=False)
 
@@ -194,7 +227,7 @@ class RetryPolicyTests(unittest.TestCase):
 
 class NoAutoPickKbTests(unittest.TestCase):
     def _env(self, **extra):
-        env = {"MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE}
+        env = {"MULTIMODAL_ENABLED": "true", "MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE}
         env.update(extra)
         return patch.dict(os.environ, env, clear=False)
 
@@ -245,7 +278,11 @@ class PublicApiCompatTests(unittest.TestCase):
     def test_search_multimodal_remote_delegates_to_shared_client(self):
         # 公开函数仍然可用（检索器、既有测试的 patch 面不变）
         session = _RecordingSession([_search_ok_response()])
-        with patch.dict(os.environ, {"MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"MULTIMODAL_ENABLED": "true", "MULTIMODAL_REMOTE_BASE_URL": FIXED_BASE},
+            clear=False,
+        ):
             with patch("server.utils.multimodal_remote.get_multimodal_sync_session", return_value=session):
                 result = search_multimodal_remote("q", {"multimodal_kb_id": "kb-1"})
         self.assertEqual(result["status"], "ok")

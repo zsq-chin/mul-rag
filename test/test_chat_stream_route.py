@@ -1,13 +1,105 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
+import sys
+import tempfile
+import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import BackgroundTasks
 
 from server.services.concurrency import BoundedGate
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _install_chat_src_shim() -> None:
+    """让 server.routers.chat_router 可在无 Milvus/Neo4j/MySQL 的主机导入。
+
+    chat_router 的 import 链会触发真实 src/__init__.py（实例化 KnowledgeBase →
+    Milvus ConnectionError）。这里以轻量 src 桩替换：真实 ThreadPoolExecutor +
+    真实 HistoryManager（spec 加载 src/core/history.py），其余运行期不会被
+    普通聊天路径触碰的组件（retriever/knowledge_base/graph_base/agent_manager/
+    select_model/get_all_tools）给空桩。被测逻辑仍是真实 chat_router。
+    """
+    if "src" in sys.modules and getattr(sys.modules["src"], "_sage_chat_shim", False):
+        return
+
+    class _StubLogger:
+        def info(self, *args, **kwargs): pass
+        def error(self, *args, **kwargs): pass
+        def warning(self, *args, **kwargs): pass
+        def debug(self, *args, **kwargs): pass
+
+    save_dir = tempfile.mkdtemp(prefix="sage-test-save-")
+    src = types.ModuleType("src")
+    src.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="test-blocking")
+    src.config = types.SimpleNamespace(
+        save_dir=save_dir,
+        default_agent_id="default",
+        model_names=[],
+        save=lambda *args, **kwargs: None,
+        _save_models_to_file=lambda *args, **kwargs: None,
+        get=lambda key, default=None: default,
+    )
+    src.retriever = types.SimpleNamespace()
+    src.knowledge_base = types.SimpleNamespace()
+    src.graph_base = types.SimpleNamespace(close=lambda: None)
+    src.shutdown_runtime = lambda: None
+    src._sage_chat_shim = True
+    sys.modules["src"] = src
+
+    utils = types.ModuleType("src.utils")
+    utils.logger = _StubLogger()
+    sys.modules["src.utils"] = utils
+    logging_config = types.ModuleType("src.utils.logging_config")
+    logging_config.logger = _StubLogger()
+    sys.modules["src.utils.logging_config"] = logging_config
+    prompts = types.ModuleType("src.utils.prompts")
+    prompts.get_system_prompt = lambda *args, **kwargs: None
+    sys.modules["src.utils.prompts"] = prompts
+
+    history_spec = importlib.util.spec_from_file_location(
+        "src.core.history", ROOT / "src" / "core" / "history.py"
+    )
+    history_mod = importlib.util.module_from_spec(history_spec)
+    sys.modules["src.core.history"] = history_mod
+    history_spec.loader.exec_module(history_mod)
+    core = types.ModuleType("src.core")
+    core.HistoryManager = history_mod.HistoryManager
+    sys.modules["src.core"] = core
+
+    agents = types.ModuleType("src.agents")
+    agents.agent_manager = types.SimpleNamespace()
+    sys.modules["src.agents"] = agents
+    tools_factory = types.ModuleType("src.agents.tools_factory")
+    tools_factory.get_all_tools = lambda *args, **kwargs: []
+    sys.modules["src.agents.tools_factory"] = tools_factory
+    models = types.ModuleType("src.models")
+    models.select_model = lambda *args, **kwargs: None
+    sys.modules["src.models"] = models
+
+    # 隔离 SQLite 路径，绝不触碰 saves/data/server.db
+    os.environ["SAGE_DB_PATH"] = os.path.join(
+        tempfile.mkdtemp(prefix="sage-test-db-"), "srv.db"
+    )
+
+
+# 在导入被测路由之前安装桩；聊天流是被测真实逻辑，桩只满足 import 期名称。
+_install_chat_src_shim()
+
+chat_spec = importlib.util.spec_from_file_location(
+    "chat_router_under_test", ROOT / "server" / "routers" / "chat_router.py"
+)
+chat_router = importlib.util.module_from_spec(chat_spec)
+sys.modules["chat_router_under_test"] = chat_router
+chat_spec.loader.exec_module(chat_router)
 
 
 class _FakeModel:
@@ -122,8 +214,6 @@ class _AsciiColonLeakModel(_FakeModel):
 
 class ChatStreamRouteTests(unittest.IsolatedAsyncioTestCase):
     async def _collect_chunks(self, model):
-        from server.routers import chat_router
-
         gate = BoundedGate("chat-output-test", limit=1, acquire_timeout=0.1)
         with (
             patch.object(chat_router, "chat_gate", gate),

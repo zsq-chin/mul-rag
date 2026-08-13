@@ -1,7 +1,40 @@
 import json
 import os
+import sys
+import types
 import unittest
 from unittest.mock import Mock, patch
+
+
+def _install_src_shim() -> None:
+    """让 server.utils.multimodal_remote 可在无 Milvus/Neo4j/MySQL 的主机导入。
+
+    multimodal_remote 模块级 ``from src.utils.logging_config import logger`` 会触发
+    真实 src/__init__.py（实例化 KnowledgeBase → Milvus 连接失败），既拖慢测试，
+    又在 runner 输出里留下 Milvus 错误标记（这些模块曾被误判为 env-missing，掩盖了
+    真实断言失败）。这里用最小 src 桩屏蔽真实 src；被测逻辑仍是真实 multimodal_remote。
+    """
+    if "src" in sys.modules and getattr(sys.modules["src"], "_sage_multimodal_shim", False):
+        return
+
+    class _StubLogger:
+        def info(self, *args, **kwargs): pass
+        def error(self, *args, **kwargs): pass
+        def warning(self, *args, **kwargs): pass
+        def debug(self, *args, **kwargs): pass
+
+    src = types.ModuleType("src")
+    src._sage_multimodal_shim = True
+    sys.modules["src"] = src
+    utils = types.ModuleType("src.utils")
+    utils.logger = _StubLogger()
+    sys.modules["src.utils"] = utils
+    logging_config = types.ModuleType("src.utils.logging_config")
+    logging_config.logger = _StubLogger()
+    sys.modules["src.utils.logging_config"] = logging_config
+
+
+_install_src_shim()
 
 from server.utils.multimodal_remote import (
     MultimodalPaginationError,
@@ -266,7 +299,10 @@ class MultimodalRemoteTests(unittest.TestCase):
 
     @patch.dict(
         os.environ,
-        {"MULTIMODAL_REMOTE_BASE_URL": "https://remote.example/api/v1"},
+        {
+            "MULTIMODAL_ENABLED": "true",
+            "MULTIMODAL_REMOTE_BASE_URL": "https://remote.example/api/v1",
+        },
         clear=False,
     )
     @patch("server.utils.multimodal_remote.get_multimodal_sync_session")
