@@ -511,14 +511,12 @@ const portrait = reactive({
 });
 
 const queryData = () => {
-  console.log('查询数据:', college.value, dataType.value);
   // 这里调用API获取数据
 };
 
 const generatePortrait = () => {
   if (!userId.value) return;
   showPortrait.value = true;
-  console.log('生成个人画像:', userId.value);
   // 这里调用API生成画像
   nextTick(() => {
     initCharts();
@@ -531,7 +529,6 @@ const resetPortrait = () => {
 };
 
 const exportData = () => {
-  console.log('导出数据');
   // 这里实现数据导出功能
 };
 

@@ -95,7 +95,6 @@ const renameTitle = (newTitle) => {
 
 const goToConversation = (index) => {
   curConvId.value = index
-  console.log("curConvId.value",convs[curConvId.value])
 }
 
 const addNewConv = () => {

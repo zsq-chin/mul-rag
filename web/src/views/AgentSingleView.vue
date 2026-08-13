@@ -31,7 +31,6 @@ const toggleSidebar = () => {
 // 用户信息点击事件
 const toggleUserInfo = () => {
   // 此处可以添加用户信息相关的逻辑
-  console.log('用户信息图标被点击');
 };
 </script>
 

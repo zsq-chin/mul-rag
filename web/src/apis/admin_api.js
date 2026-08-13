@@ -362,7 +362,6 @@ export const systemConfigApi = {
    */
   updateConfigItems: async (items) => {
     checkAdminPermission()
-    console.log("updateConfigItems", items)
     return apiPost('/api/config/update', items, {}, true)
   },
 

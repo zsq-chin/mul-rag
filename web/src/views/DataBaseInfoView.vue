@@ -479,11 +479,9 @@ const filterQueryResults = () => {
   }
 
   let results = toRaw(queryResult.value.all_results);
-  console.log("results", results);
 
   if (meta.filter) {
     results = results.filter(r => r.distance >= meta.distanceThreshold);
-    console.log("before", results);
 
     // 根据排序方式决定排序逻辑
     if (configStore.config.enable_reranker) {
@@ -502,7 +500,6 @@ const filterQueryResults = () => {
       results = results.sort((a, b) => b.distance - a.distance);
     }
 
-    console.log("after", results);
 
     results = results.slice(0, meta.topK);
   }
@@ -516,7 +513,6 @@ const onQuery = () => {
     return
   }
 
-  console.log(queryText.value)
   state.searchLoading = true
   if (!queryText.value.trim()) {
     message.error('请输入查询内容')
@@ -531,7 +527,6 @@ const onQuery = () => {
       meta: meta
     })
     .then(data => {
-      console.log(data)
       queryResult.value = data
       filterQueryResults()
     })
@@ -550,13 +545,9 @@ const onQuery = () => {
 }
 
 const handleFileUpload = (event) => {
-  console.log(event)
-  console.log(fileList.value)
 }
 
 const handleDrop = (event) => {
-  console.log(event)
-  console.log(fileList.value)
 }
 
 const afterOpenChange = (visible) => {
@@ -573,7 +564,6 @@ const handleRefresh = () => {
   state.refrashing = true
   getDatabaseInfo().then(() => {
     state.refrashing = false
-    console.log("database: ",database.value)
   })
 }
 
@@ -591,7 +581,6 @@ const deleteDatabse = () => {
       state.lock = true
       knowledgeBaseApi.deleteDatabase(databaseId.value)
         .then(data => {
-          console.log(data)
           message.success(data.message || '删除成功')
           router.push('/database')
         })
@@ -604,7 +593,6 @@ const deleteDatabse = () => {
         })
     },
     onCancel: () => {
-      console.log('Cancel');
     },
   });
 }
@@ -624,7 +612,6 @@ const openFileDetail = (record) => {
   try {
     knowledgeBaseApi.getDocumentDetail(databaseId.value, record.file_id)
       .then(data => {
-        console.log(data);
         if (data.status == "failed") {
           message.error(data.message);
           state.fileDetailModalVisible = false;
@@ -704,10 +691,8 @@ const getDatabaseInfo = () => {
 
 const deleteFile = (fileId) => {
   state.lock = true
-  console.debug("deleteFile", databaseId.value, fileId)
   knowledgeBaseApi.deleteFile(databaseId.value, fileId)
     .then(data => {
-      console.log(data)
       message.success(data.message || '删除成功')
       getDatabaseInfo()
     })
@@ -722,7 +707,6 @@ const deleteFile = (fileId) => {
 
 
 const handleDeleteFile = (fileId) => {
-  console.log(fileId)
   //删除提示
   Modal.confirm({
     title: '删除文件',
@@ -731,7 +715,6 @@ const handleDeleteFile = (fileId) => {
     cancelText: '取消',
     onOk: () => deleteFile(fileId),
     onCancel: () => {
-      console.log('Cancel');
     },
   });
 }
@@ -804,9 +787,7 @@ const getTotalChunks = () => {
 
 // "生成分块" - 修改后的逻辑
 const chunkFiles = () => {
-  console.log("文件列表: ",fileList.value)
   const files = fileList.value.filter(file => file.status === 'done').map(file => file.response.file_id)
-  console.log(files)
 
   if (files.length === 0) {
     message.error('请先上传文件')
@@ -821,7 +802,6 @@ const chunkFiles = () => {
     params: chunkParams.value
   })
   .then(data => {
-    console.log('文件处理结果:', data)
     if (data.status === 'success') {
       message.success(data.message || '文件已提交处理，请稍后在列表刷新查看状态');
       fileList.value = []; // 清空已上传文件列表
@@ -860,7 +840,6 @@ const chunkUrls = () => {
     params: chunkParams.value
   })
   .then(data => {
-    console.log('URL处理结果:', data);
     if (data.status === 'success') {
       message.success(data.message || 'URL已提交处理，请稍后在列表刷新查看状态');
       urlList.value = ''; // 清空URL输入
@@ -891,7 +870,6 @@ const columns = [
 
 watch(() => route.params.database_id, (newId) => {
     databaseId.value = newId;
-    console.log(newId)
     clearInterval(state.refreshInterval)
     getDatabaseInfo()
   }

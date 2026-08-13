@@ -111,7 +111,6 @@ const loadDatabases = () => {
   // loadGraph()
   knowledgeBaseApi.getDatabases()
     .then(data => {
-      console.log(data)
       databases.value = data.databases
       state.loading = false
     })
@@ -126,7 +125,6 @@ const loadDatabases = () => {
 
 const createDatabase = () => {
   newDatabase.loading = true
-  console.log(newDatabase)
   if (!newDatabase.name) {
     message.error('数据库名称不能为空')
     newDatabase.loading = false
@@ -139,7 +137,6 @@ const createDatabase = () => {
       dimension: newDatabase.dimension ? parseInt(newDatabase.dimension) : null,
     })
   .then(data => {
-    console.log(data)
     loadDatabases()
     newDatabase.open = false
     newDatabase.name = ''

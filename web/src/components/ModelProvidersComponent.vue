@@ -382,7 +382,6 @@ const fetchProviderModels = (provider) => {
   providerConfig.loading = true;
   chatApi.getProviderModels(provider)
     .then(data => {
-      console.log(`${provider} 模型列表:`, data);
 
       // 处理各种可能的API返回格式
       let modelsList = [];
@@ -400,7 +399,6 @@ const fetchProviderModels = (provider) => {
         modelsList = data.models.data;
       }
 
-      console.log("处理后的模型列表:", modelsList);
       providerConfig.allModels = modelsList;
       providerConfig.loading = false;
     })
@@ -423,7 +421,6 @@ const saveProviderConfig = async () => {
   try {
     // 发送选择的模型列表到后端
     const data = await chatApi.updateProviderModels(providerConfig.provider, providerConfig.selectedModels);
-    console.log('更新后的模型列表:', data.models);
 
     message.success({ content: '模型配置已保存!', key: 'save-config', duration: 2 });
 

@@ -211,12 +211,10 @@ onUnmounted(() => {
 })
 
 const sendRestart = () => {
-  console.log('Restarting...')
   message.loading({ content: '重新加载模型中', key: "restart", duration: 0 });
 
   systemConfigApi.restartServer()
     .then(() => {
-      console.log('Restarted')
       message.success({ content: '重新加载完成!', key: "restart", duration: 2 });
       setTimeout(() => {
         window.location.reload()

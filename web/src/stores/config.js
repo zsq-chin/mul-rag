@@ -24,7 +24,6 @@ export const useConfigStore = defineStore('config', () => {
     config.value[key] = value
     systemConfigApi.updateConfigItems({ [key]: value })
       .then(data => {
-        console.debug('Success:', data)
         setConfig(data)
       })
   }
@@ -38,7 +37,6 @@ export const useConfigStore = defineStore('config', () => {
     // 发送到服务器
     systemConfigApi.updateConfigItems(items)
       .then(data => {
-        console.debug('Success:', data)
         setConfig(data)
       })
   }
@@ -46,7 +44,6 @@ export const useConfigStore = defineStore('config', () => {
   function refreshConfig() {
     systemConfigApi.getSystemConfig()
       .then(data => {
-        console.log("config", data)
         setConfig(data)
       })
   }

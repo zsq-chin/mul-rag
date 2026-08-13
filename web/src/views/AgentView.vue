@@ -217,7 +217,6 @@ const fetchDefaultAgent = async () => {
   try {
     const data = await chatApi.getDefaultAgent();
     defaultAgentId.value = data.default_agent_id;
-    console.log("Default agent ID:", defaultAgentId.value);
   } catch (error) {
     console.error('获取默认智能体错误:', error);
   }
@@ -290,7 +289,6 @@ const loadAgentConfig = async () => {
           agentConfig.value[key] = response.config[key];
         }
       });
-      console.log(`从服务器加载 ${selectedAgentId.value} 配置成功, ${JSON.stringify(agentConfig.value)}`);
     }
   } catch (error) {
     console.error('从服务器加载配置出错:', error);
@@ -313,7 +311,6 @@ const saveConfig = async () => {
     await systemConfigApi.saveAgentConfig(selectedAgentId.value, agentConfig.value);
     // 提示保存成功
     message.success('配置已保存到服务器');
-    console.log("保存配置:", agentConfig.value);
   } catch (error) {
     console.error('保存配置到服务器出错:', error);
     message.error('保存配置到服务器失败');
@@ -403,7 +400,6 @@ const goToAgentPage = () => {
 
 const toggleDebugMode = () => {
   state.debug_mode = !state.debug_mode;
-  console.log("debug_mode", state.debug_mode);
 };
 
 const toggleSidebar = () => {

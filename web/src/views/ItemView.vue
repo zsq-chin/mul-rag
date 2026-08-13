@@ -1403,7 +1403,6 @@ const handleExamResult = (event) => {
   if (event.data.type === 'examSubmitted') {
     try {
       const result = JSON.parse(event.data.data) // 反序列化数据
-      console.log('收到考试结果:', result)
       handleExamSubmit(result)
     } catch (e) {
       console.error('解析考试结果失败:', e)

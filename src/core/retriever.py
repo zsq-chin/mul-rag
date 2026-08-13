@@ -199,7 +199,6 @@ class Retriever:
         from src.utils.prompts import build_chat_prompt
         external = "\n\n".join(external_parts) if external_parts else ""
         query = build_chat_prompt(query, external, meta, params=meta.get("isItemRequest"))
-        logger.info(f"-------------RAG-final-prompt---------- {str(query)}")
         return query
 
     def query_classification(self, query):

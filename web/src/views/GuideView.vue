@@ -484,7 +484,6 @@ const sendMessage = () => {
     appendAiMessage("");
     fetchChatResponse(user_input)
   } else {
-    console.log('请输入消息');
   }
 }
 
@@ -568,7 +567,6 @@ const fetchChatResponse = (user_input) => {
   })
   .catch((error) => {
     if (error.name === 'AbortError') {
-      console.log('Fetch aborted');
     } else {
       console.error('聊天请求错误:', error);
 
@@ -596,7 +594,6 @@ const fetchChatResponse = (user_input) => {
 const updateCurrentMessage = (info) => {
   // const msg = conv.value.messages.find((msg) => msg.id === info.id);
   const aiMsg = msg.find((m) => m.role === "received");
-  console.log('updateCurrentMessage called with msg:', msg);
   if (aiMsg) {
     try {
       // 特殊处理：content需要追加而不是替换

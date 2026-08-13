@@ -325,7 +325,6 @@ const handleCasRedirect = async () => {
     const sessionToken = urlParams.get('session_token');
 
     if (sessionToken) {
-      console.log('检测到CAS重定向登录成功（安全方案）');
 
       // 使用session token交换用户信息
       try {
@@ -338,7 +337,6 @@ const handleCasRedirect = async () => {
 
         if (response.ok) {
           const userData = await response.json();
-          console.log('Session token验证成功，用户信息:', userData);
 
           // 如果返回了 access_token，则保存到 userStore 与 localStorage，以标记为已登录
           if (userData.access_token) {

@@ -20,6 +20,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   api:
     build:
@@ -72,6 +78,8 @@ services:
       - MINERU_OCR_URI=http://mineru-api:5051
       - MODEL_DIR=/models
       - RUNNING_IN_DOCKER=true
+      # 9.3.1：CORS 显式来源（逗号分隔），未设置时后端回退本机开发来源；不再用 "*"+credentials
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
       # I1.1/I1.3：多模态由 MULTIMODAL_ENABLED + MULTIMODAL_MODE 显式控制；
       # Base URL 不再有硬编码私网 IP 静默默认值（未配置即为多模态未启用）。
       - MULTIMODAL_ENABLED=${MULTIMODAL_ENABLED:-}
@@ -135,6 +143,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
   web:
@@ -167,6 +181,20 @@ services:
       # vite 开发服务器无需联网；如需真实代理，请显式写成可被容器访问的
       # 宿主网关地址（host.docker.internal 对应端口），不要用回环地址。
     command: pnpm run server
+    # 9.2.4：Web 服务也应有真实健康检查（开发态检查 Vite 端口 5173；
+    # 生产态由 docker-compose.prod.yml 覆盖为 nginx :80 的 wget 检查）
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:5173', r => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
   graph:
@@ -183,6 +211,19 @@ services:
       - NEO4J_server_bolt_listen__address=0.0.0.0:7687
       - NEO4J_server_http_listen__address=0.0.0.0:7474
       - ENTITY_EMBEDDING=true
+    healthcheck:
+      # 9.2.4：Neo4j 真实健康检查——HTTP 端口可响应即存活（wget 不带凭据，不触碰认证）
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:7474/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - app-network
     restart: unless-stopped
@@ -254,6 +295,12 @@ services:
     depends_on:
       - "etcd"
       - "minio"
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - app-network
     restart: unless-stopped
@@ -379,6 +426,12 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - app-network
     restart: unless-stopped

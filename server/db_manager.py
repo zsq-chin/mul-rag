@@ -101,5 +101,12 @@ class DBManager:
         finally:
             session.close()
 
+    def close(self):
+        """关闭引擎并释放全部 SQLite 连接（9.1.4：应用 shutdown 不再残留 unclosed connection）。"""
+        try:
+            self.engine.dispose()
+        except Exception as exc:  # 关闭阶段异常不允许打断进程退出
+            logger.warning("DB engine dispose 失败: %s", exc)
+
 # 创建全局数据库管理器实例
 db_manager = DBManager()

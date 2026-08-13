@@ -26,7 +26,7 @@
           </div>
         </div>
         <div class="header__center">
-          <div @click="console.log(currentChat)" class="center-title">
+          <div class="center-title">
             {{ currentChat?.title }}
           </div>
           <slot name="header-center"></slot>
@@ -267,7 +267,6 @@ const selectChat = async (chatId) => {
     return;
   }
 
-  console.log("选择对话:", chatId);
 
   // 切换到选中的对话
   currentChatId.value = chatId;
@@ -428,7 +427,6 @@ const handleStreamResponse = async (response) => {
             const data = JSON.parse(line.trim());
             await processResponseChunk(data);
           } catch (e) {
-            console.debug('解析JSON出错:', e.message);
           }
         }
       }
@@ -465,7 +463,6 @@ const processResponseChunk = async (data) => {
   if (data.status === 'init') {
     // 代表服务端收到请求并返回第一个响应
     state.waitingServerResponse = false;
-    console.log("处理流数据:", data.msg);
     onGoingConv.msgChunks[data.request_id] = [data.msg];
 
   } else if (data.status === 'loading') {
@@ -508,7 +505,6 @@ const fetchAgents = async () => {
       acc[agent.name] = agent;
       return acc;
     }, {});
-    console.log("agents", agents.value);
   } catch (error) {
     console.error('获取智能体错误:', error);
   }
@@ -547,9 +543,7 @@ const getAgentHistory = async () => {
   }
 
   try {
-    console.log(`正在获取智能体[${props.agentId}]的历史记录，对话ID: ${currentChatId.value}`);
     const response = await chatApi.getAgentHistory(props.agentId, currentChatId.value);
-    console.log('智能体历史记录:', response);
 
     // 如果成功获取历史记录并且是数组
     if (response && Array.isArray(response.history)) {
@@ -619,7 +613,6 @@ const convertServerHistoryToMessages = (serverHistory) => {
     }
   }
 
-  console.log("conversations", conversations);
   return conversations;
 };
 
@@ -633,7 +626,6 @@ onMounted(async () => {
 onMounted(() => {
   watch(() => props.agentId, async (newAgentId, oldAgentId) => {
     try {
-      console.log("智能体ID变化", oldAgentId, "->", newAgentId);
 
       // 如果变化了，重置会话并加载新数据
       if (newAgentId !== oldAgentId) {
@@ -677,7 +669,6 @@ const scrollToBottom = async () => {
 const toggleSidebar = () => {
   state.isSidebarOpen = !state.isSidebarOpen;
   localStorage.setItem('chat_sidebar_open', state.isSidebarOpen);
-  console.log("toggleSidebar", state.isSidebarOpen);
 }
 
 // 处理键盘事件

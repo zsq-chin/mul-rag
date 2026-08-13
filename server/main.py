@@ -20,6 +20,7 @@ from server.services.http_clients import (
 )
 from server.utils.auth_middleware import is_public_path
 from server.utils import multimodal_remote
+from server.utils.cors_config import resolve_cors_config
 from src import config, shutdown_runtime
 from src.utils.logging_config import logger
 
@@ -110,16 +111,21 @@ async def app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
                     await close_tianshu_client()
                 finally:
                     shutdown_runtime()
+                    # 9.1.4：应用 shutdown 释放全部 SQLite 连接，消除 unclosed connection 警告
+                    db_manager.close()
 
 
 app = FastAPI(lifespan=app_lifespan)
 app.include_router(router, prefix="/api")
 
-# CORS 设置
+# CORS 设置：使用环境变量中的明确前端来源，不再 allow_origins=["*"] 加 credentials（9.3.1）。
+_cors_origins, _cors_allow_credentials = resolve_cors_config(
+    os.getenv("CORS_ALLOWED_ORIGINS", "")
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

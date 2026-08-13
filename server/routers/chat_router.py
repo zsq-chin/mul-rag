@@ -522,7 +522,6 @@ async def chat_post(
                 # 失败不影响主要流程，只是没有推荐问题
                 pass
             related_questions = complete_related_questions(related_questions)
-            logger.debug(f"Generated related questions: {related_questions}")
 
             # === 修改结束：将 related_questions 加入到 finished 块中 ===
 

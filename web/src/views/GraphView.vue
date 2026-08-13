@@ -425,7 +425,6 @@ const setGraphType = (type) => {
   activeGraphType.value = type;
   fetchFileList();
   fetchDownloadableFiles();
-  console.log('切换图谱类型:', type);
 };
 
 const downloadFileList = ref([
@@ -494,13 +493,11 @@ const handleDocumentForGraphrag = async () => {
 
   try {
     for (const [index, filePath] of files.entries()) {
-      console.log(`(${index + 1}/${files.length}) 即将发送给后端的文件:`, filePath)
 
       // 调用后端接口处理文件
       const result = await graphApi.file_handle(filePath)
 
       if (result.status === 'success') {    // H1：成功 200 + status=success；失败抛 4xx/5xx 进 catch
-        console.log(`✅ 文件 ${filePath} 处理成功`)
       } else {
         console.warn(`❌ 文件 ${filePath} 处理失败`, result)
       }
@@ -636,11 +633,6 @@ const downloadFile = async (file) => {
 
     // 获取 blob
     const blob = await response.blob();
-    console.log('Blob信息:', {
-      type: blob.type,
-      size: blob.size,
-      isBlob: blob instanceof Blob
-    });
 
     if (blob.size === 0) {
       throw new Error('下载的文件为空');
@@ -747,7 +739,6 @@ const loadSampleNodes = () => {
     .then((data) => {
       graphData.nodes = data.result.nodes
       graphData.edges = data.result.edges
-      console.log(graphData)
 
       // 计算节点指标后渲染图谱
       calculateNodeMetrics();
@@ -795,8 +786,6 @@ const onSearch = () => {
       if (graphData.nodes.length === 0) {
         message.info('未找到相关实体')
       }
-      console.log(data)
-      console.log(graphData)
 
       // 计算节点指标后渲染图谱
       calculateNodeMetrics();
@@ -925,7 +914,6 @@ const expandNode = async (nodeId) => {
       centerY = bounds.center[1];
     }
 
-    console.log('最终中心节点位置:', centerX, centerY);
 
     // 转换为G6格式
     const g6Nodes = newNodes.map((node, index) => {
@@ -939,7 +927,6 @@ const expandNode = async (nodeId) => {
       const x = centerX + Math.cos(angle) * radius;
       const y = centerY + Math.sin(angle) * radius;
 
-      console.log(`节点 ${node.id} 初始位置: (${x}, ${y})`);
 
       return {
         id: node.id,
@@ -1023,7 +1010,6 @@ const expandNode = async (nodeId) => {
           easing: 'easeOutCubic', // 使用缓动函数让动画更平滑
         },
         onLayoutEnd: () => {
-          console.log('温和布局完成');
           graphInstance.fitView();
           graphInstance.render();
           resolve();
@@ -1133,7 +1119,6 @@ const initGraph = () => {
     behaviors: ['drag-element', 'zoom-canvas', 'drag-canvas'],
   });
   graphInstance.on('node:click', (event) => {
-    console.log('G6 5.x 节点点击事件完整对象:', event);
 
     // 尝试多种方式获取节点ID
     let nodeId;
@@ -1143,19 +1128,16 @@ const initGraph = () => {
     if (event.item && event.item.id) {
       nodeId = event.item.id;
       nodeData = event.item;
-      console.log('通过 event.item 获取节点:', nodeId, nodeData);
     }
     // 方式2: 从 event.target 获取
     else if (event.target && event.target.id) {
       nodeId = event.target.id;
       nodeData = event.target;
-      console.log('通过 event.target 获取节点:', nodeId, nodeData);
     }
     // 方式3: 从 event.data 获取
     else if (event.data && event.data.id) {
       nodeId = event.data.id;
       nodeData = event.data;
-      console.log('通过 event.data 获取节点:', nodeId, nodeData);
     }
     // 方式4: 从事件的原始数据获取
     else if (event.originalEvent && event.originalEvent.target) {
@@ -1168,20 +1150,16 @@ const initGraph = () => {
       if (element && element.__data__) {
         nodeId = element.__data__.id;
         nodeData = element.__data__;
-        console.log('通过 DOM 元素获取节点:', nodeId, nodeData);
       }
     }
 
     if (nodeId) {
-      console.log('成功获取节点ID:', nodeId);
       expandNode(nodeId);
     } else {
       console.error('无法获取节点ID，完整事件对象:', event);
 
       // 输出事件对象的所有可枚举属性
-      console.log('事件对象属性:', Object.keys(event));
       for (let key in event) {
-        console.log(`event.${key}:`, event[key]);
       }
     }
   });
@@ -1211,13 +1189,9 @@ onBeforeUnmount(() => {
 
 
 const handleFileUpload = (event) => {
-  console.log(event)
-  console.log(fileList.value)
 }
 
 const handleDrop = (event) => {
-  console.log(event)
-  console.log(fileList.value)
 }
 
 const graphStatusClass = computed(() => {
