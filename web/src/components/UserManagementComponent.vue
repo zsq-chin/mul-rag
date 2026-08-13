@@ -24,6 +24,10 @@
         :pagination="{ pageSize: 10 }"
         :scroll="{ x: 780 }"
       >
+        <template #emptyText>
+          <!-- 7.3.5：空状态明确反馈 -->
+          <div class="user-empty-state">暂无用户，点击"添加用户"创建账号</div>
+        </template>
         <!-- 角色列自定义渲染 -->
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'role'">
@@ -378,6 +382,12 @@ onMounted(() => {
   .error-message {
     color: red;
     margin: 10px 0;
+  }
+
+  .user-empty-state {
+    padding: 24px 0;
+    color: var(--text-secondary, #999);
+    font-size: 13px;
   }
 
   .table-actions {

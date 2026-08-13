@@ -203,9 +203,10 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  // 从服务器刷新当前用户角色，每次页面加载只调用一次
-  async function hydrate() {
-    if (hydrated || !token.value) return
+  // 从服务器刷新当前用户角色。
+  // force=true 时无条件重新拉取（7.2.4：角色改变后立即刷新菜单/路由/Token）。
+  async function hydrate(force = false) {
+    if ((hydrated && !force) || !token.value) return
     hydrated = true
     try {
       const response = await fetch('/api/auth/me', {
@@ -290,7 +291,13 @@ export const useUserStore = defineStore('user', () => {
         throw new Error(error.detail || '更新用户失败')
       }
 
-      return await response.json()
+      const updated = await response.json()
+      // 7.2.4：编辑的是自己时，立即同步本地角色，菜单/路由权限随之刷新
+      if (userId === userStore.userId && updated.role) {
+        userRole.value = updated.role
+        localStorage.setItem('user_role', updated.role)
+      }
+      return updated
     } catch (error) {
       console.error('更新用户错误:', error)
       throw error

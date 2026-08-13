@@ -247,6 +247,12 @@ const router = createRouter({
       meta: { requiresAuth: true, roles: rolesForRoute('/exam/:id') }
     },
     {
+      path: '/forbidden',
+      name: 'forbidden',
+      component: () => import('../views/ForbiddenView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',
       component: () => import('../views/EmptyView.vue'),
@@ -261,7 +267,8 @@ router.beforeEach(async (to, from, next) => {
   const userStore = useUserStore()
 
   if (userStore.isLoggedIn) {
-    await userStore.hydrate()
+    // 7.2.4：每次导航都强制刷新角色，保证角色改变后菜单、路由权限、Token 立即生效
+    await userStore.hydrate(true)
   }
 
   const isLoggedIn = userStore.isLoggedIn
@@ -286,8 +293,10 @@ router.beforeEach(async (to, from, next) => {
   }, null)
 
   if (requiresAuth && requiredRoles && !canAccessRoute(userStore.userRole, requiredRoles)) {
+    // 7.2.2：直接输入管理路由 → 进入 403 无权限页，不白屏、不无限跳转。
+    // /forbidden 不带 roles，自身不触发本分支，因此不会重定向死循环。
     message.warning('没有权限访问该功能')
-    next(DEFAULT_ROUTE)
+    next({ path: '/forbidden', query: { from: to.fullPath } })
     return
   }
 
