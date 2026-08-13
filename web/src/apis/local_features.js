@@ -46,7 +46,7 @@ export const governanceApi = {
     `/api/governance/databases/${dbId}/documents/${fileId}/versions/${version}/download`,
 }
 
-/** 问答测试集（仅 superadmin；只做用例管理，不调用模型） */
+/** 问答测试集（仅 superadmin） */
 export const evaluationApi = {
   suites: (params) => {
     const qs = new URLSearchParams(
@@ -75,6 +75,8 @@ export const evaluationApi = {
     apiPatch(`/api/evaluation/suites/${suiteId}/cases/${caseId}`, payload, {}, true),
   deleteCase: (suiteId, caseId) =>
     apiDelete(`/api/evaluation/suites/${suiteId}/cases/${caseId}`, {}, true),
+  executeSuite: (suiteId) =>
+    apiPost(`/api/evaluation/suites/${suiteId}/execute`, {}, {}, true),
   importUrl: (suiteId, format) =>
     `/api/evaluation/suites/${suiteId}/import?format=${format}`,
   exportUrl: (suiteId, format) =>

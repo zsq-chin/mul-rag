@@ -1,6 +1,6 @@
 """问答测试集业务逻辑（会话注入，纯服务层，便于单元测试）。
 
-覆盖：测试集/用例 CRUD、分页搜索、JSON/CSV 导入导出。
+覆盖：测试集/用例 CRUD、分页搜索、JSON/CSV 导入导出、执行（execute_suite）。
 
 安全约束：
 - 仅 superadmin 访问（由 router 鉴权）。
@@ -73,15 +73,21 @@ def _serialize_suite(row, case_count=None):
     }
 
 
+def _parse_key_points(raw) -> list[str]:
+    """把库中存储的 key_points JSON 字符串解析为字符串列表；空/非法返回 []。"""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(x) for x in parsed]
+    except (ValueError, TypeError):
+        pass
+    return []
+
+
 def _serialize_case(row):
-    key_points = []
-    if row.key_points:
-        try:
-            parsed = json.loads(row.key_points)
-            if isinstance(parsed, list):
-                key_points = [str(x) for x in parsed]
-        except (ValueError, TypeError):
-            key_points = []
+    key_points = _parse_key_points(row.key_points)
     return {
         "id": row.id,
         "suite_id": row.suite_id,
@@ -492,3 +498,85 @@ def export_cases_csv(session: Session, suite_id: int) -> str:
             ]
         )
     return buf.getvalue()
+
+
+# --- 执行 ---
+
+
+def _judge_by_key_points(key_points: list[str], answer_text: str) -> bool:
+    """按要点子串判分：全部要点都出现在答案中才算通过（不区分大小写）。"""
+    lowered = answer_text.lower()
+    return all(str(kp).strip().lower() in lowered for kp in key_points if str(kp).strip())
+
+
+def execute_suite(session: Session, suite_id: int, answerer) -> dict:
+    """执行测试集：对每个启用的用例调用 answerer 获取答案并自动判分。
+
+    answerer 签名: (question: str, kb_id: str | None) -> (response: str | None, error: str | None)
+    约定两者至多一个非 None：error 非 None 表示该用例无法作答（计入 errored，不判分）；
+    否则若存在 key_points 则按子串匹配判分（matched/judged），无 key_points 时该用例
+    执行成功但未判分（unjudged）。
+
+    纯计算 + 外部调用：不写库、不改状态，结果以报告形式返回，失败信息逐条透出，
+    避免"批量失败被 200 掩盖"（8.1.2）。
+    """
+    suite = _get_suite(session, suite_id)
+    cases = (
+        session.query(EvaluationCase)
+        .filter(EvaluationCase.suite_id == suite_id, EvaluationCase.enabled == 1)
+        .order_by(EvaluationCase.id)
+        .all()
+    )
+    if not cases:
+        raise EvaluationError("该测试集没有启用的用例，请先添加或启用用例")
+
+    passed = 0
+    failed = 0
+    errored = 0
+    unjudged = 0
+    results = []
+    for case in cases:
+        question = str(case.question or "").strip()
+        key_points = _parse_key_points(case.key_points)
+        item = {
+            "case_id": case.id,
+            "question": question,
+            "expected": case.answer,
+            "key_points": key_points,
+            "kb_id": case.kb_id,
+            "response": None,
+            "error": None,
+            "matched": None,
+            "judged": False,
+        }
+        try:
+            answer_text, error = answerer(question, case.kb_id)
+        except Exception as e:  # 执行器自身异常也按单条失败计，不让整批崩掉
+            answer_text, error = None, f"执行器异常：{e}"
+        if error:
+            item["error"] = str(error)[:500]
+            errored += 1
+            results.append(item)
+            continue
+        item["response"] = (answer_text or "")[:2000]
+        if key_points:
+            item["matched"] = bool(_judge_by_key_points(key_points, answer_text or ""))
+            item["judged"] = True
+            if item["matched"]:
+                passed += 1
+            else:
+                failed += 1
+        else:
+            unjudged += 1
+        results.append(item)
+
+    return {
+        "suite_id": suite_id,
+        "suite_name": suite.name,
+        "total": len(cases),
+        "passed": passed,
+        "failed": failed,
+        "errored": errored,
+        "unjudged": unjudged,
+        "cases": results,
+    }

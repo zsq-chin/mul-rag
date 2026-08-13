@@ -345,7 +345,8 @@ class EvaluationRouterSourceTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
     def test_all_endpoints_are_superadmin_only(self):
-        self.assertEqual(self.src.count("get_superadmin_user"), 12)
+        # 11 个既有端点 + execute = 12 个 Depends 出现 + 1 处 import
+        self.assertEqual(self.src.count("get_superadmin_user"), 13)
 
     def test_import_uses_upload_file_and_audit(self):
         self.assertIn("UploadFile", self.src)

@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import asyncio
 import functools
 import traceback
@@ -46,6 +47,53 @@ GRAPH_FILE_HANDLE_POLL_INTERVAL = 5
 async def _run_blocking(func, *args, **kwargs):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, functools.partial(func, *args, **kwargs))
+
+
+def _resp_detail(resp) -> str:
+    """从上游响应里提取可回显的错误细节（截断，不暴露内部路径）。"""
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            return str(
+                data.get("detail")
+                or data.get("message")
+                or data.get("error")
+                or resp.text[:200]
+            )
+        return str(data)[:200]
+    except Exception:
+        return (resp.text or "")[:200]
+
+
+def _raise_graph_upstream(status_code: int, detail: str) -> None:
+    """8.1.2：参数错误回 400/422、资源不存在回 404、其余上游失败一律 502。"""
+    if status_code in (400, 404, 422):
+        raise HTTPException(status_code=status_code, detail=detail or "请求无效")
+    raise HTTPException(status_code=502, detail=detail or f"图谱服务返回错误（{status_code}）")
+
+
+def _graph_upstream_error(exc: Exception) -> HTTPException:
+    """8.1.2：上游转发异常映射——超时 504、连接/请求失败 502。"""
+    if isinstance(exc, httpx.TimeoutException):
+        return HTTPException(status_code=504, detail="图谱服务处理超时")
+    if isinstance(exc, httpx.ConnectError):
+        return HTTPException(status_code=502, detail="图谱服务连接失败")
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            detail = exc.response.json().get("detail") or exc.response.text[:200]
+        except Exception:
+            detail = (exc.response.text or "")[:200]
+        return _graph_upstream_for_status(exc.response.status_code, detail)
+    if isinstance(exc, httpx.HTTPError):
+        return HTTPException(status_code=502, detail="图谱服务请求失败")
+    return HTTPException(status_code=502, detail="图谱服务不可用")
+
+
+def _graph_upstream_for_status(status: int, detail: str) -> HTTPException:
+    """8.1.2：参数错误回 400/422、资源不存在回 404、其余上游失败一律 502。"""
+    if status in (400, 404, 422):
+        return HTTPException(status_code=status, detail=detail or "请求无效")
+    return HTTPException(status_code=502, detail=detail or f"图谱服务返回错误（{status}）")
 
 @data.get("/")
 async def get_databases(current_user: User = Depends(get_required_user)):
@@ -471,41 +519,52 @@ async def graphfile_handle(request: FileHandleRequest, current_user: User = Depe
 
 @data.post("/graph/build_graph")
 async def api_build_graph(current_user: User = Depends(get_superadmin_user)):
+    """8.1.2：上游失败返回 502、超时返回 504，不再返回 HTTP 200 的 failed 字典。"""
     try:
         client = get_graph_worker_client()
         async with upstream_proxy_gate:
             resp = await client.post("/build_graph", json={"clean_copypath": True})
         if resp.status_code != 200:
-            return {"status": "failed", "detail": f"远程服务错误: {resp.text}"}
+            _raise_graph_upstream(resp.status_code, _resp_detail(resp))
         return {"status": "success", "detail": resp.json()}
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"status": "failed", "detail": str(e)}
+        raise _graph_upstream_error(e) from e
 
 @data.post("/graph/build_drillgraph")
 async def api_build_drillgraph(current_user: User = Depends(get_superadmin_user)):
+    """8.1.2：上游失败返回 502、超时返回 504，不再返回 HTTP 200 的 failed 字典。"""
     try:
         client = get_graph_worker_client()
         async with upstream_proxy_gate:
             resp = await client.post("/build_drillgraph", json={"clean_copypath": True})
         if resp.status_code != 200:
-            return {"status": "failed", "detail": f"远程服务错误: {resp.text}"}
+            _raise_graph_upstream(resp.status_code, _resp_detail(resp))
         return {"status": "success", "detail": resp.json()}
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"status": "failed", "detail": str(e)}
+        raise _graph_upstream_error(e) from e
 
 @data.get("/graph/get_file_list/{graph_type}")
 async def api_get_file_list(graph_type: str, current_user: User = Depends(get_superadmin_user)):
+    """8.1.2：上游非 2xx 时按状态回 400/404/502，不再返回 200 的 failed 字典。"""
     try:
         client = get_graph_worker_client()
         async with upstream_proxy_gate:
             resp = await client.get(f"/get_file_list/{graph_type}")
+        if resp.status_code != 200:
+            _raise_graph_upstream(resp.status_code, _resp_detail(resp))
         return Response(
             content=resp.content,
             status_code=resp.status_code,
             media_type=resp.headers.get("content-type", "application/json"),
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"status": "failed", "detail": str(e)}
+        raise _graph_upstream_error(e) from e
 
 @data.delete("/graph/delete_file/{graph_type}/{file_name}")
 async def api_delete_graph_file(
@@ -520,11 +579,7 @@ async def api_delete_graph_file(
         async with upstream_proxy_gate:
             resp = await client.delete(f"/delete_file/{graph_type}/{encoded_file_name}")
         if resp.status_code >= 400:
-            try:
-                detail = resp.json().get("detail", resp.text)
-            except Exception:
-                detail = resp.text
-            raise HTTPException(status_code=resp.status_code, detail=detail)
+            _raise_graph_upstream(resp.status_code, _resp_detail(resp))
         return Response(
             content=resp.content,
             status_code=resp.status_code,
@@ -533,27 +588,36 @@ async def api_delete_graph_file(
     except HTTPException:
         raise
     except Exception as e:
-        return {"status": "failed", "detail": str(e)}
+        raise _graph_upstream_error(e) from e
 
 @data.get("/graph/get_downloadable_files/{graph_type}")
 async def api_get_downloadable_files(graph_type: str, current_user: User = Depends(get_superadmin_user)):
+    """8.1.2：上游非 2xx 时按状态回 400/404/502，不再返回 200 的 failed 字典。"""
     try:
         client = get_graph_worker_client()
         async with upstream_proxy_gate:
             resp = await client.get(f"/get_downloadable_files/{graph_type}")
+        if resp.status_code != 200:
+            _raise_graph_upstream(resp.status_code, _resp_detail(resp))
         return Response(
             content=resp.content,
             status_code=resp.status_code,
             media_type=resp.headers.get("content-type", "application/json"),
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"status": "failed", "detail": str(e)}
+        raise _graph_upstream_error(e) from e
 
 @data.get("/graph/download_file/{graph_type}/{file_name}")
 async def api_download_file(graph_type: str, file_name: str, current_user: User = Depends(get_superadmin_user)):
-    """Stream a file download from the graph worker without buffering in memory."""
+    """Stream a file download from the graph worker without buffering in memory.
+
+    8.1.2：不支持的图表类型回 400；上游连接失败回 502、超时回 504、
+    上游 4xx/5xx 按状态回 400/404/502，不再返回 200 的 failed 字典。
+    """
     if graph_type not in ("ground", "drill"):
-        return {"status": "failed", "detail": "不支持的图表类型"}
+        raise HTTPException(status_code=400, detail="不支持的图表类型")
 
     encoded_filename = quote(file_name, safe='')
     client = get_graph_worker_client()
@@ -565,25 +629,34 @@ async def api_download_file(graph_type: str, file_name: str, current_user: User 
     except asyncio.CancelledError:
         await upstream_proxy_gate.__aexit__(None, None, None)
         raise
+    except httpx.TimeoutException as exc:
+        await upstream_proxy_gate.__aexit__(type(exc), exc, exc.__traceback__)
+        logger.error(f"Graph file download timed out: {exc}")
+        raise HTTPException(status_code=504, detail="图谱服务处理超时") from exc
+    except httpx.HTTPError as exc:
+        await upstream_proxy_gate.__aexit__(type(exc), exc, exc.__traceback__)
+        logger.error(f"Graph file download error: {exc}")
+        raise HTTPException(status_code=502, detail="图谱服务连接失败") from exc
     except Exception as exc:
         await upstream_proxy_gate.__aexit__(type(exc), exc, exc.__traceback__)
         logger.error(f"Graph file download error: {exc}")
-        return {"status": "failed", "detail": f"文件下载失败: {exc}"}
+        raise HTTPException(status_code=502, detail="图谱服务不可用") from exc
 
     if resp.status_code != 200:
         try:
-            error_msg = f"文件下载失败，状态码: {resp.status_code}"
+            error_body = await resp.aread()
+            try:
+                detail = (error_body and json.loads(error_body).get("detail")) or ""
+            except Exception:
+                detail = error_body.decode("utf-8", errors="replace")[:200]
+            if not detail:
+                detail = f"文件下载失败，状态码: {resp.status_code}"
             if resp.status_code in (400, 404):
-                try:
-                    error_body = await resp.aread()
-                    import json as _json
-                    error_msg = _json.loads(error_body).get("detail", error_msg)
-                except Exception:
-                    pass
+                raise HTTPException(status_code=resp.status_code, detail=detail)
+            raise HTTPException(status_code=502, detail=detail)
         finally:
             await resp.aclose()
             await upstream_proxy_gate.__aexit__(None, None, None)
-        return {"status": "failed", "detail": error_msg}
 
     encoded_file_name = quote(file_name, safe='')
     content_disposition = f"attachment; filename*=UTF-8''{encoded_file_name}"

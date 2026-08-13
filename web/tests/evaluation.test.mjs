@@ -31,6 +31,21 @@ test('evaluation API calls carry auth and hit the right endpoints', () => {
   assert.match(localFeatures, /apiDelete\(`\/api\/evaluation\/suites\/\$\{suiteId\}\/cases\/\$\{caseId\}`, \{\}, true\)/)
 })
 
+test('evaluation execute posts to the suite execute endpoint with auth (8.2)', () => {
+  assert.match(localFeatures, /executeSuite: \(suiteId\) =>/)
+  assert.match(localFeatures, /apiPost\(`\/api\/evaluation\/suites\/\$\{suiteId\}\/execute`, \{\}, \{\}, true\)/)
+})
+
+test('EvaluationView offers a run action and renders an honest per-case report', () => {
+  assert.match(view, /runSuite\(record\)/)
+  assert.match(view, /executeResult/)
+  assert.match(view, /执行结果/)
+  // 报告按用例展示回答/要点/判定/异常，而非伪造准确率
+  assert.match(view, /record\.matched/)
+  assert.match(view, /record\.error/)
+  assert.doesNotMatch(view, /accuracy/i)
+})
+
 test('evaluation import and export use authenticated URLs', () => {
   assert.match(localFeatures, /importUrl: \(suiteId, format\) =>/)
   assert.match(localFeatures, /`\/api\/evaluation\/suites\/\$\{suiteId\}\/import\?format=\$\{format\}`/)

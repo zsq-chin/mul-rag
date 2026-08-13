@@ -307,5 +307,157 @@ class GraphServiceStateHttpTests(GraphRouterH1TestBase):
         self.assertEqual(resp.status_code, 503)
 
 
+# ---------------------------------------------------------------------------
+# §8.1.2 —— 图谱工作节点代理：不再返回 HTTP 200 的 status=failed 字典
+# 上游非 2xx 按 400/404/502 映射；连接失败 502、超时 504；成功原样透传。
+# ---------------------------------------------------------------------------
+class _FakeWorkerResponse:
+    """极简图谱工作节点 httpx 响应替身：json/text/content/headers/流接口。"""
+
+    def __init__(self, status_code=200, json_data=None, text="", content=None, headers=None):
+        self.status_code = status_code
+        self._json = json_data
+        self.text = text
+        self.content = content if content is not None else text.encode("utf-8")
+        self.headers = headers or {"content-type": "application/json"}
+
+    def json(self):
+        if self._json is not None:
+            return self._json
+        raise ValueError("no json body")
+
+    async def aread(self):
+        return self.content
+
+    async def aclose(self):
+        return None
+
+    async def aiter_bytes(self, chunk_size=65536):
+        for i in range(0, len(self.content), chunk_size):
+            yield self.content[i : i + chunk_size]
+
+
+class GraphWorkerForwardingHttpTests(GraphRouterH1TestBase):
+    def _worker_client(self, method="post", response=None, exc=None):
+        client = Mock()
+        if exc is not None:
+            setattr(client, method, AsyncMock(side_effect=exc))
+        else:
+            setattr(client, method, AsyncMock(return_value=response))
+        return client
+
+    def test_build_graph_upstream_500_returns_502(self):
+        resp = _FakeWorkerResponse(500, json_data={"detail": "构建失败"})
+        with patch.object(
+            data_router, "get_graph_worker_client",
+            return_value=self._worker_client("post", response=resp),
+        ):
+            r = self.client.post("/api/data/graph/build_graph")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("构建失败", r.json()["detail"])
+
+    def test_build_graph_upstream_404_returns_404(self):
+        resp = _FakeWorkerResponse(404, json_data={"detail": "not found"})
+        with patch.object(
+            data_router, "get_graph_worker_client",
+            return_value=self._worker_client("post", response=resp),
+        ):
+            r = self.client.post("/api/data/graph/build_graph")
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["detail"], "not found")
+
+    def test_build_graph_connect_error_returns_502(self):
+        with patch.object(
+            data_router, "get_graph_worker_client",
+            return_value=self._worker_client("post", exc=httpx.ConnectError("down")),
+        ):
+            r = self.client.post("/api/data/graph/build_graph")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("连接失败", r.json()["detail"])
+
+    def test_build_graph_timeout_returns_504(self):
+        with patch.object(
+            data_router, "get_graph_worker_client",
+            return_value=self._worker_client("post", exc=httpx.TimeoutException("slow")),
+        ):
+            r = self.client.post("/api/data/graph/build_graph")
+        self.assertEqual(r.status_code, 504)
+        self.assertIn("超时", r.json()["detail"])
+
+    def test_build_graph_success_returns_200(self):
+        resp = _FakeWorkerResponse(200, json_data={"ok": 1})
+        with patch.object(
+            data_router, "get_graph_worker_client",
+            return_value=self._worker_client("post", response=resp),
+        ):
+            r = self.client.post("/api/data/graph/build_graph")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["status"], "success")
+
+    def test_build_drillgraph_upstream_503_returns_502(self):
+        resp = _FakeWorkerResponse(503, json_data={"message": "忙"})
+        with patch.object(
+            data_router, "get_graph_worker_client",
+            return_value=self._worker_client("post", response=resp),
+        ):
+            r = self.client.post("/api/data/graph/build_drillgraph")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("忙", r.json()["detail"])
+
+    def test_get_file_list_upstream_500_returns_502(self):
+        resp = _FakeWorkerResponse(500, json_data={"error": "boom"})
+        with patch.object(
+            data_router, "get_graph_worker_client",
+            return_value=self._worker_client("get", response=resp),
+        ):
+            r = self.client.get("/api/data/graph/get_file_list/ground")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("boom", r.json()["detail"])
+
+    def test_get_file_list_success_passes_through(self):
+        resp = _FakeWorkerResponse(200, content=b'{"files": []}')
+        with patch.object(
+            data_router, "get_graph_worker_client",
+            return_value=self._worker_client("get", response=resp),
+        ):
+            r = self.client.get("/api/data/graph/get_file_list/ground")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"files": []})
+
+    def test_get_downloadable_files_upstream_400_returns_400(self):
+        resp = _FakeWorkerResponse(400, json_data={"detail": "参数无效"})
+        with patch.object(
+            data_router, "get_graph_worker_client",
+            return_value=self._worker_client("get", response=resp),
+        ):
+            r = self.client.get("/api/data/graph/get_downloadable_files/ground")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("参数无效", r.json()["detail"])
+
+    def test_delete_file_upstream_500_returns_502(self):
+        resp = _FakeWorkerResponse(500, json_data={"detail": "删除失败"})
+        with patch.object(
+            data_router, "get_graph_worker_client",
+            return_value=self._worker_client("delete", response=resp),
+        ):
+            r = self.client.delete("/api/data/graph/delete_file/ground/foo.csv")
+        self.assertEqual(r.status_code, 502)
+
+    def test_download_file_bad_graph_type_returns_400(self):
+        r = self.client.get("/api/data/graph/download_file/weird/foo.csv")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("不支持的图表类型", r.json()["detail"])
+
+    def test_download_file_upstream_404_returns_404(self):
+        resp = _FakeWorkerResponse(404, content='{"detail": "文件不存在"}'.encode("utf-8"))
+        client = Mock()
+        client.build_request = Mock(return_value=httpx.Request("GET", "http://worker/fake"))
+        client.send = AsyncMock(return_value=resp)
+        with patch.object(data_router, "get_graph_worker_client", return_value=client):
+            r = self.client.get("/api/data/graph/download_file/ground/foo.csv")
+        self.assertEqual(r.status_code, 404)
+        self.assertIn("文件不存在", r.json()["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -322,6 +322,35 @@ const exportSuite = async (record, format) => {
   }
 }
 
+// ---------- 执行 ----------
+const executeVisible = ref(false)
+const executeLoading = ref(false)
+const executeResult = ref(null)
+const executingSuiteName = ref('')
+
+const runSuite = async (record) => {
+  executeLoading.value = true
+  executeResult.value = null
+  executingSuiteName.value = record.name
+  try {
+    const res = await evaluationApi.executeSuite(record.id)
+    if (res && res.status === 'success' && res.data) {
+      executeResult.value = res.data
+      executeVisible.value = true
+      const { total, passed, failed, errored } = res.data
+      if (total > 0 && failed === 0 && errored === 0) {
+        message.success(`执行完成：${passed}/${total} 通过`)
+      } else {
+        message.warning(`执行完成：通过 ${passed}，未通过 ${failed}，异常 ${errored}`)
+      }
+    }
+  } catch (e) {
+    message.error(e.message || '执行失败')
+  } finally {
+    executeLoading.value = false
+  }
+}
+
 onMounted(loadSuites)
 </script>
 
@@ -377,6 +406,7 @@ onMounted(loadSuites)
         </template>
         <template v-else-if="column.key === 'action'">
           <a-button type="link" @click="openCases(record)">用例</a-button>
+          <a-button type="link" :loading="executeLoading" @click="runSuite(record)">执行</a-button>
           <a-dropdown>
             <a-button type="link">导出<DownOutlined /></a-button>
             <template #overlay>
@@ -558,6 +588,60 @@ onMounted(loadSuites)
         style="margin-top: 8px"
       />
     </a-modal>
+
+    <!-- 执行结果 -->
+    <a-modal
+      v-model:open="executeVisible"
+      :title="`执行结果：${executingSuiteName}`"
+      :footer="null"
+      width="860px"
+    >
+      <div v-if="executeResult" class="execute-summary">
+        <a-statistic title="总用例" :value="executeResult.total || 0" />
+        <a-statistic title="通过" :value="executeResult.passed || 0" :value-style="{ color: '#52c41a' }" />
+        <a-statistic title="未通过" :value="executeResult.failed || 0" :value-style="{ color: '#ff4d4f' }" />
+        <a-statistic title="异常" :value="executeResult.errored || 0" :value-style="{ color: '#faad14' }" />
+        <a-statistic title="未判分" :value="executeResult.unjudged || 0" />
+      </div>
+      <a-table
+        v-if="executeResult"
+        :data-source="executeResult.cases || []"
+        row-key="case_id"
+        size="small"
+        :pagination="{ pageSize: 8 }"
+        :columns="[
+          { title: '问题', dataIndex: 'question', key: 'question' },
+          { title: '模型回答', dataIndex: 'response', key: 'response', ellipsis: true },
+          { title: '要点', dataIndex: 'key_points', key: 'key_points', width: 120 },
+          { title: '判定', dataIndex: 'judged', key: 'judged', width: 90 },
+          { title: '异常', dataIndex: 'error', key: 'error', width: 140 },
+        ]"
+        :scroll="{ x: 720 }"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'response'">
+            <span v-if="record.response">{{ record.response }}</span>
+            <span v-else class="muted">-</span>
+          </template>
+          <template v-else-if="column.key === 'key_points'">
+            <span v-if="record.key_points && record.key_points.length">
+              {{ record.key_points.join('、') }}
+            </span>
+            <span v-else class="muted">-</span>
+          </template>
+          <template v-else-if="column.key === 'judged'">
+            <a-tag v-if="record.error" color="orange">异常</a-tag>
+            <a-tag v-else-if="record.judged && record.matched" color="green">通过</a-tag>
+            <a-tag v-else-if="record.judged && !record.matched" color="red">未通过</a-tag>
+            <a-tag v-else color="default">未判分</a-tag>
+          </template>
+          <template v-else-if="column.key === 'error'">
+            <span v-if="record.error">{{ record.error }}</span>
+            <span v-else class="muted">-</span>
+          </template>
+        </template>
+      </a-table>
+    </a-modal>
   </div>
 </template>
 
@@ -575,5 +659,11 @@ onMounted(loadSuites)
 }
 .muted {
   color: rgba(0, 0, 0, 0.45);
+}
+.execute-summary {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
 }
 </style>

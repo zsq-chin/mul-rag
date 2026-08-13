@@ -43,6 +43,27 @@ def _audit(action, user, suite_id, status, detail, ip):
     )
 
 
+def _default_eval_answerer(question: str, kb_id):
+    """默认执行器：调用本机/配置的模型回答单个问题。
+
+    返回 (response, error)，约定至多一个非 None，绝不抛异常。
+    远端多模态知识库属黑盒（本轮不接入）：kb_id 仅透传，不查询远端索引。
+    模型未配置/调用失败时逐条以 error 透出，由报告汇总，不整批 502（8.2）。
+    """
+    try:
+        from src.models import select_model
+
+        model = select_model()
+        messages = [{"role": "user", "content": question}]
+        resp = model.predict(messages, stream=False)
+        content = getattr(resp, "content", None)
+        if content is None or not str(content).strip():
+            return None, "模型返回为空"
+        return str(content), None
+    except Exception as e:
+        return None, f"模型调用失败：{e}"
+
+
 # --- 测试集 ---
 
 
@@ -204,6 +225,35 @@ async def delete_evaluation_case(
     _audit("evaluation.case.delete", superadmin, suite_id, "success",
            {"suite_id": suite_id, "case_id": case_id}, request.client.host)
     return {"status": "success", "data": {"deleted": True}, "message": "用例已删除"}
+
+
+# --- 执行 ---
+
+
+@router.post("/suites/{suite_id}/execute")
+async def execute_evaluation_suite(
+    suite_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    superadmin=Depends(get_superadmin_user),
+):
+    """执行测试集：对启用的用例调用模型作答并自动判分，返回报告（不落库）。
+
+    无启用用例 → 400；测试集不存在 → 404；非 superadmin → 403。
+    单条模型失败记入报告 error 字段，不掩盖批量结果（8.1.2 / 8.2）。
+    """
+    try:
+        data = evaluation_service.execute_suite(
+            db, suite_id, answerer=_default_eval_answerer
+        )
+    except evaluation_service.EvaluationError as e:
+        _audit("evaluation.execute", superadmin, suite_id, "failed",
+               {"suite_id": suite_id}, request.client.host)
+        raise _to_http(e)
+    _audit("evaluation.execute", superadmin, suite_id, "success",
+           {"suite_id": suite_id, "total": data["total"], "passed": data["passed"]},
+           request.client.host)
+    return {"status": "success", "data": data, "message": "测试集执行完成"}
 
 
 # --- 导入 / 导出 ---
