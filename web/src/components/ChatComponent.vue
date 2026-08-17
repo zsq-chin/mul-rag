@@ -20,6 +20,15 @@
         <div class="model-title-fixed">新建对话</div>
       </div>
       <div class="header__right">
+        <div class="header-model-selector">
+          <ModelSelectorComponent
+            :model_name="configStore.config?.model_name"
+            :model_provider="configStore.config?.model_provider"
+            :selected="selectedModel"
+            :allow-personal="true"
+            @select-model="handleModelSelect"
+          />
+        </div>
         <div class="nav-btn text" @click="opts.showPanel = !opts.showPanel">
           <Ellipsis />
           <!-- <span class="text">选项</span> -->
@@ -85,13 +94,6 @@
           @keydown="handleKeyDown"
         >
           <template #options-left>
-            <ModelSelectorComponent
-              :model_name="configStore.config?.model_name"
-              :model_provider="configStore.config?.model_provider"
-              :selected="selectedModel"
-              :allow-personal="true"
-              @select-model="handleModelSelect"
-            />
             <div class="opt-item retrieval-mode" v-if="knowledgeRetrievalEnabled">
               <span
                 class="retrieval-mode__item"
@@ -178,6 +180,14 @@
                 </a-menu>
               </template>
             </a-dropdown>
+            <div
+              :class="{'switch': true, 'opt-item': true, 'active': meta.use_knowledge_dictionary}"
+              @click="meta.use_knowledge_dictionary=!meta.use_knowledge_dictionary"
+              title="开启后在回答中检索已发布知识字典的术语定义作为参考"
+            >
+              <BookMarked style="margin-right: 3px;" size="14"/>
+              知识字典
+            </div>
           </template>
         </MessageInputComponent>
         <!-- <p class="note">请注意辨别内容的可靠性 By {{ configStore.config?.model_provider }}: {{ configStore.config?.model_name }}</p> -->
@@ -196,14 +206,14 @@
 </template>
 
 <script setup>
-import { reactive, ref, onMounted, toRefs, nextTick, onUnmounted, watch, computed } from 'vue'
+import { reactive, ref, onMounted, onActivated, toRefs, nextTick, onUnmounted, watch, computed } from 'vue'
 import {
   BookOutlined,
   CompassOutlined,
   PlusCircleOutlined,
   DeploymentUnitOutlined,
 } from '@ant-design/icons-vue'
-import { Ellipsis, PanelLeftOpen, MessageSquarePlus, Compass, Waypoints, BookCheck, Search, Layers } from 'lucide-vue-next'
+import { Ellipsis, PanelLeftOpen, MessageSquarePlus, Compass, Waypoints, BookCheck, Search, Layers, BookMarked } from 'lucide-vue-next'
 import { onClickOutside } from '@vueuse/core'
 import { useConfigStore } from '@/stores/config'
 import { useUserStore } from '@/stores/user'
@@ -258,6 +268,7 @@ const meta = reactive({
   use_graph: false,
   use_web: false,
   use_multimodal_kb: false,
+  use_knowledge_dictionary: false, // 知识字典检索（检索已发布活动版本的条目作为参考）
   multimodal_kb_id: null,
   multimodal_kb_name: null,
   multimodal_file_id: null,
@@ -802,7 +813,7 @@ const retryMessage = (id) => {
 
 // 从本地存储加载数据
 onMounted(async () => {
-  scrollToBottom()
+  scrollToLatest()
   loadDatabases()
   try {
     const models = await userModelsStore.load()
@@ -837,6 +848,11 @@ onUnmounted(() => {
   messagesContainer.value?.removeEventListener('scroll', handleUserScroll);
 });
 
+// 每次重新进入智能问答页面（keepAlive 激活）时滚到聊天记录最底部
+onActivated(() => {
+  scrollToLatest();
+});
+
 // 添加新函数来处理特定的滚动行为
 const forceScrollToBottom = () => {
   shouldAutoScroll.value = true;
@@ -848,6 +864,19 @@ const forceScrollToBottom = () => {
   }, 10);
 };
 
+// 进入页面 / 切换对话 / 历史加载完成时，自动滚到聊天记录最底部（不干扰用户手动上翻）
+const scrollToLatest = () => {
+  shouldAutoScroll.value = true;
+  nextTick(() => {
+    setTimeout(() => {
+      const container = messagesContainer.value
+      if (container) {
+        container.scrollTop = container.scrollHeight - container.clientHeight;
+      }
+    }, 80);
+  });
+};
+
 watch(
   () => conv.value.history,
   (newMessages) => {
@@ -857,6 +886,24 @@ watch(
     opts.hasSentMessage = false;
   },
   { deep: true }
+)
+
+// 切换对话时滚到该对话的最底部
+watch(
+  () => conv.value?.id,
+  () => {
+    scrollToLatest();
+  }
+)
+
+// 历史聊天记录异步加载完成（消息从 0 变为 N）时滚到底部
+watch(
+  () => conv.value?.messages?.length,
+  (newCount, oldCount) => {
+    if (!oldCount && newCount) {
+      scrollToLatest();
+    }
+  }
 )
 
 // 处理发送或停止
@@ -1032,6 +1079,12 @@ const handleQuestionClick = (question) => {
     .header__left, .header__right {
       display: flex;
       align-items: center;
+    }
+
+    .header-model-selector {
+      display: flex;
+      align-items: center;
+      margin-right: 6px;
     }
   }
 

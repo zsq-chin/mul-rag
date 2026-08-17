@@ -20,6 +20,14 @@ from server.models.operations_model import (
     AlertRule,
     AlertEvent,
 )
+from server.models.knowledge_dictionary_models import (
+    KnowledgeDictionary,
+    KnowledgeDictionaryVersion,
+    KnowledgeDictionarySource,
+    KnowledgeDictionaryEntry,
+    KnowledgeDictionaryEvidence,
+    KnowledgeDictionaryJob,
+)
 from src.utils import logger
 
 class DBManager:
@@ -72,6 +80,10 @@ class DBManager:
         """创建数据库表"""
         # 确保所有表都会被创建，SQLAlchemy会自动扫描所有继承自Base的类并注册它们
         Base.metadata.create_all(self.engine)
+        # create_all 不会给已存在的表加新列：补齐历史库缺失的模型列（幂等）
+        from server.db_column_migration import ensure_missing_columns
+
+        ensure_missing_columns(self.engine, Base.metadata)
         logger.info("Database tables created/checked")
 
     def get_session(self):

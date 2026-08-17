@@ -215,6 +215,32 @@ const router = createRouter({
       ]
     },
     {
+      path: '/knowledge-dictionaries',
+      name: 'knowledge-dictionaries',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'KnowledgeDictionaryComp',
+          component: () => import('../views/KnowledgeDictionaryView.vue'),
+          meta: { keepAlive: true, requiresAuth: true, roles: rolesForRoute('/knowledge-dictionaries') }
+        }
+      ]
+    },
+    {
+      path: '/knowledge-dictionaries/:dictionary_id',
+      name: 'KnowledgeDictionaryDetailComp',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'KnowledgeDictionaryDetail',
+          component: () => import('../components/KnowledgeDictionaryDetail.vue'),
+          meta: { keepAlive: false, requiresAuth: true, roles: rolesForRoute('/knowledge-dictionaries') }
+        }
+      ]
+    },
+    {
       path: '/search',
       name: 'search',
       component: AppLayout,

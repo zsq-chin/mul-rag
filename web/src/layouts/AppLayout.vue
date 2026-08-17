@@ -6,7 +6,7 @@ import {
   BugOutlined,
   ExclamationCircleOutlined,
 } from '@ant-design/icons-vue'
-import { Bot, Flame ,Waypoints,TextSearch ,Speech ,Share2 ,Captions ,Milestone, LibraryBig,BookOpenCheck , MessageSquareMore, Settings,Hourglass,PencilLine ,Move, BarChart3, Layers, Moon, Sun, ClipboardCheck, ServerCog } from 'lucide-vue-next';
+import { Bot, Flame ,Waypoints,TextSearch ,Speech ,Share2 ,Captions ,Milestone, LibraryBig,BookOpenCheck , MessageSquareMore, Settings,Hourglass,PencilLine ,Move, BarChart3, Layers, Moon, Sun, ClipboardCheck, ServerCog, BookMarked } from 'lucide-vue-next';
 
 import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
@@ -65,6 +65,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', updateWindowWidth))
 // 图标映射
 const ICON_MAP = {
   chat: MessageSquareMore,
+  dictionary: BookMarked,
   users: TeamOutlined,
   graph: Share2,
   database: BookOpenCheck,
@@ -191,11 +192,11 @@ const mainList = computed(() => {
             </a-tooltip>
           </div> -->
 
-          <!-- 用户信息组件 -->
+          <!-- 用户信息组件（下拉菜单内含“用户管理”入口） -->
           <div class="nav-item user-info">
             <a-tooltip placement="right">
               <template #title>用户信息</template>
-              <UserInfoComponent />
+              <UserInfoComponent @open-user-management="userDrawerOpen = true" />
             </a-tooltip>
           </div>
 
@@ -239,7 +240,7 @@ const mainList = computed(() => {
           <Moon v-else class="icon" :size="20" />
           <span class="text">主题</span>
         </button>
-        <UserInfoComponent class="mobile-user-info" />
+        <UserInfoComponent class="mobile-user-info" @open-user-management="userDrawerOpen = true" />
       </div>
       <div
         id="app-router-view"
@@ -562,13 +563,18 @@ div.header, #app-router-view {
   border-right: none;
   border-bottom: 1px solid var(--main-light-2);
   background-color: var(--main-light-3);
-  padding: 0 72px 0 20px;
+  padding: 0 24px 0 20px;
   gap: 0px;
+
+  .fill {
+    display: none; // 顶栏模式下导航区自行占满剩余空间，fill 不再参与布局
+  }
 
   .logo {
     width: fit-content;
     height: 40px;
     margin-right: 16px;
+    flex-shrink: 0; // logo 不被压缩
     display: flex;
     align-items: center;
 
@@ -599,7 +605,31 @@ div.header, #app-router-view {
   .nav {
     flex-direction: row;
     height: auto;
-    // gap: 10px;
+    // 导航项增多时左右可滑动：占据 logo 与右侧控件之间的空间，超宽滚动不压缩变形
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-left: 24px;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 4px;
+    padding-bottom: 2px;
+    // 溢出时显示浅白色发光细滚动条，可直接拖动（Chrome/Edge）
+    &::-webkit-scrollbar {
+      height: 6px;
+    }
+    &::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.7);
+      border-radius: 3px;
+      box-shadow: 0 0 8px rgba(255, 255, 255, 0.6); // 发光效果
+    }
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    // Firefox 浅白色细滚动条
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.7) transparent;
   }
 
   .nav-item {
@@ -607,6 +637,8 @@ div.header, #app-router-view {
     width: auto;
     padding: 4px 16px;
     margin: 0;
+    flex-shrink: 0; // 单项不被压缩，保持图标与文字不变形
+    white-space: nowrap; // 文字不换行
 
     .icon {
       margin-right: 8px;

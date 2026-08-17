@@ -2,7 +2,7 @@ export const DEFAULT_ROUTE = '/chat'
 
 export const NAVIGATION = [
   { key: 'chat', name: '智能问答', path: '/chat', roles: ['user', 'admin', 'superadmin'] },
-  { key: 'users', name: '用户管理', action: 'users', roles: ['admin', 'superadmin'] },
+  { key: 'dictionary', name: '知识字典', path: '/knowledge-dictionaries', roles: ['user', 'admin', 'superadmin'] },
   { key: 'graph', name: '知识图谱', path: '/graph', roles: ['superadmin'] },
   { key: 'database', name: '知识库', path: '/database', roles: ['superadmin'] },
   { key: 'statistics', name: '问答统计', path: '/statistics', roles: ['superadmin'] },
@@ -19,9 +19,12 @@ export const canUseGraph = role => role === 'superadmin'
 const AUTHENTICATED_ROLES = Object.freeze(['user', 'admin', 'superadmin'])
 const SUPERADMIN_ROLES = Object.freeze(['superadmin'])
 
-export const rolesForRoute = path => (
-  path === '/chat' ? [...AUTHENTICATED_ROLES] : [...SUPERADMIN_ROLES]
-)
+export const rolesForRoute = path => {
+  if (path === '/chat' || path === '/knowledge-dictionaries') {
+    return [...AUTHENTICATED_ROLES]
+  }
+  return [...SUPERADMIN_ROLES]
+}
 
 export const filterUsers = (users, query) => {
   const term = String(query || '').trim().toLowerCase()

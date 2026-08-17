@@ -348,6 +348,10 @@ async def chat_post(
 
     meta = meta or {}
     assert_chat_features_allowed(current_user, meta)
+    # 服务端注入权威身份（前端不可伪造），供知识字典检索的权限判断使用。
+    # 用 getattr 兜底：测试/轻量用户对象可能只有 id 而无 role，缺失时字典检索回退为 user。
+    meta["_dict_user_id"] = getattr(current_user, "id", None)
+    meta["_dict_user_role"] = getattr(current_user, "role", None) or "user"
 
     # [新增] 添加后台任务，不再阻塞主线程
     # 注意：这里不需要传入 db，因为后台任务会自己创建新的 session
@@ -383,7 +387,13 @@ async def chat_post(
         }, ensure_ascii=False).encode('utf-8') + b"\n"
 
     def need_retrieve(meta):
-        return meta.get("use_web") or meta.get("use_graph") or meta.get("db_id") or meta.get("use_multimodal_kb")
+        return (
+            meta.get("use_web")
+            or meta.get("use_graph")
+            or meta.get("db_id")
+            or meta.get("use_multimodal_kb")
+            or meta.get("use_knowledge_dictionary")
+        )
 
     # Sentinel for safe sync-iterator exhaustion (StopIteration cannot
     # propagate through a Future, so the executor thread signals via a

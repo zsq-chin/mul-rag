@@ -196,12 +196,35 @@ onMounted(() => {
 
     .options__right {
       width: fit-content;
+      flex-shrink: 0;
     }
 
     .options__left {
       flex: 1;
+      min-width: 0;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-bottom: 4px;
+      // 溢出时显示浅白色发光细滚动条，可直接拖动（Chrome/Edge）
+      &::-webkit-scrollbar {
+        height: 6px;
+      }
+      &::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.7);
+        border-radius: 3px;
+        box-shadow: 0 0 8px rgba(255, 255, 255, 0.6); // 发光效果
+      }
+      &::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      // Firefox 浅白色细滚动条
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 255, 255, 0.7) transparent;
 
       :deep(.opt-item) {
+        flex-shrink: 0; // 选项不被压缩变形
+        white-space: nowrap;
         border-radius: 12px;
         border: 1px solid var(--gray-300);
         padding: 5px 10px;

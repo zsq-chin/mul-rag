@@ -149,6 +149,7 @@ class Retriever:
         refs["graph_base"] = self.query_graph(query, history, refs)
         refs["web_search"] = self.query_web(query, history, refs)
         refs["multimodal_knowledge_base"] = self.query_multimodal_knowledgebase(query, history, refs)
+        refs["knowledge_dictionary"] = self.query_knowledge_dictionary(query, refs)
 
         return refs
 
@@ -193,6 +194,32 @@ class Retriever:
                 external_parts.extend(["多模态知识库信息:", multimodal_text])
         elif meta.get("use_multimodal_kb") and multimodal_refs.get("message"):
             external_parts.extend(["多模态知识库状态:", multimodal_refs["message"]])
+
+        # 解析知识字典检索结果（已发布活动版本的术语条目）
+        dict_refs = refs.get("knowledge_dictionary", {})
+        dict_res = dict_refs.get("results", [])
+        if dict_res:
+            dict_lines = []
+            for item in dict_res[:5]:
+                parts = [f"标准名称：{item.get('standard_name') or ''}"]
+                if item.get("category"):
+                    parts.append(f"分类：{item['category']}")
+                parts.append(f"定义：{item.get('definition') or ''}")
+                if item.get("unit"):
+                    parts.append(f"单位：{item['unit']}")
+                if item.get("data_type"):
+                    parts.append(f"数据类型：{item['data_type']}")
+                synonyms = item.get("synonyms") or []
+                if synonyms:
+                    parts.append(f"同义词：{'、'.join(str(s) for s in synonyms[:8])}")
+                if item.get("value_rule"):
+                    parts.append(f"取值规则：{item['value_rule']}")
+                if item.get("dictionary_name"):
+                    parts.append(f"来源字典：{item['dictionary_name']}")
+                dict_lines.append("；".join(parts))
+            external_parts.extend(["知识字典信息:", "\n".join(f"- {line}" for line in dict_lines)])
+        elif meta.get("use_knowledge_dictionary") and dict_refs.get("message"):
+            external_parts.extend(["知识字典状态:", dict_refs["message"]])
 
         # 构造查询：未启用任何检索时保持原样返回（普通聊天回归，P1-2）；
         # 已启用检索但证据为空时才注入“无证据”模板，要求模型明确说明证据不足而非编造
@@ -345,6 +372,50 @@ class Retriever:
             response["message"] = f"多模态知识库检索失败: {e}"
             response["status"] = "error"
 
+        return response
+
+    def query_knowledge_dictionary(self, query, refs):
+        """知识字典检索：只在已发布活动版本的 approved 条目上语义检索（§10.4）。
+
+        权限依据 chat_router 服务端注入的 _dict_user_role / _dict_user_id，
+        前端提交的任何身份字段都不可信。检索失败只降级提示，不中断问答。
+        """
+        meta = refs["meta"]
+        response = {
+            "results": [],
+            "message": "",
+            "status": "",
+        }
+        if not meta.get("use_knowledge_dictionary"):
+            return response
+        try:
+            from types import SimpleNamespace
+
+            from server.services.knowledge_dictionary import vector_indexer as kd_indexer
+            from server.services.knowledge_dictionary.errors import ServiceUnavailable
+            from server.db_manager import db_manager as _db_manager
+
+            role = meta.get("_dict_user_role") or "user"
+            user_id = meta.get("_dict_user_id")
+            user = SimpleNamespace(id=user_id, role=role)
+            session = _db_manager.get_session()
+            try:
+                result = kd_indexer.search_entries(
+                    session, user, query=query, top_k=5
+                )
+                response["results"] = result.get("items", [])
+                response["status"] = "ok" if result.get("items") else "empty"
+                if not result.get("items"):
+                    response["message"] = "知识字典未检索到相关条目"
+            finally:
+                session.close()
+        except ServiceUnavailable as e:
+            response["status"] = "error"
+            response["message"] = f"知识字典检索不可用: {e}"
+        except Exception as e:  # 字典检索失败只降级，不中断问答
+            logger.error(f"Knowledge dictionary search error: {e}")
+            response["status"] = "error"
+            response["message"] = f"知识字典检索失败: {e}"
         return response
 
     # ==== 多轮检索 (MultiRound / MultiQuery) ====

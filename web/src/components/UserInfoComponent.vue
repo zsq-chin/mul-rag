@@ -17,6 +17,10 @@
             <span class="user-menu-role">{{ userRoleText }}</span>
           </a-menu-item>
           <a-menu-divider />
+          <a-menu-item v-if="canManageUsers" key="user-management" @click="openUserManagement">
+            <TeamOutlined /> &nbsp;用户管理
+          </a-menu-item>
+          <a-menu-divider v-if="canManageUsers" />
           <a-menu-item key="logout" @click="logout">
             <LogoutOutlined /> &nbsp;退出登录
           </a-menu-item>
@@ -33,7 +37,7 @@
 import { computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { useUserStore } from '@/stores/user';
-import { UserOutlined, LogoutOutlined } from '@ant-design/icons-vue';
+import { UserOutlined, LogoutOutlined, TeamOutlined } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 import { CircleUser, UserRoundCheck } from 'lucide-vue-next';
 
@@ -46,6 +50,8 @@ const props = defineProps({
     default: false
   }
 })
+
+const emit = defineEmits(['open-user-management'])
 //设置用户
 // const goToSetting = computed(() => {
 //   if (userStore.userRole === 'superadmin') {
@@ -88,6 +94,13 @@ const logout = () => {
   message.success('已退出登录');
   // 跳转到首页
   router.push('/login');
+};
+
+// 用户管理（admin/superadmin 可见）：通知父级打开用户管理抽屉
+const canManageUsers = computed(() => ['admin', 'superadmin'].includes(userStore.userRole))
+
+const openUserManagement = () => {
+  emit('open-user-management');
 };
 
 // 前往登录页

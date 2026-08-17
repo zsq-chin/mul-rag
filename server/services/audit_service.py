@@ -56,6 +56,23 @@ KNOWN_ACTIONS = [
     "alert.rule.delete",
     "alert.event.acknowledge",
     "alert.email.test",
+    "dictionary.create",
+    "dictionary.update",
+    "dictionary.delete",
+    "dictionary.version.publish",
+    "dictionary.version.withdraw",
+    "dictionary.job.create",
+    "dictionary.job.cancel",
+    "dictionary.job.retry",
+    "dictionary.entry.create",
+    "dictionary.entry.update",
+    "dictionary.entry.delete",
+    "dictionary.entry.review",
+    "dictionary.entry.merge",
+    "dictionary.index.build",
+    "dictionary.export",
+    "dictionary.seed.import",
+    "dictionary.upload",
 ]
 # 说明：使用标准 logging 而非 src.utils.logging_config.logger，
 # 避免模块导入即触发 src/__init__（Milvus 连接），保证本地可测试性。
