@@ -88,6 +88,8 @@ services:
       - MULTIMODAL_KB_DEFAULT_KB_ID=${MULTIMODAL_KB_DEFAULT_KB_ID:-}
       - MULTIMODAL_KB_TIMEOUT=${MULTIMODAL_KB_TIMEOUT:-30}
       - MULTIMODAL_KB_TOP_K=${MULTIMODAL_KB_TOP_K:-5}
+      # I1.3/4.1.2：内网 http 远端须显式 MULTIMODAL_ALLOW_HTTP=1（未设置保持默认关闭）
+      - MULTIMODAL_ALLOW_HTTP=${MULTIMODAL_ALLOW_HTTP:-}
       - MODEL_CREDENTIAL_MASTER_KEY=${MODEL_CREDENTIAL_MASTER_KEY:?Set MODEL_CREDENTIAL_MASTER_KEY in .env}
       - USER_MODEL_ALLOWED_HOSTS=${USER_MODEL_ALLOWED_HOSTS:-}
       - USER_MODEL_ALLOW_HTTP=${USER_MODEL_ALLOW_HTTP:-false}
@@ -436,6 +438,59 @@ services:
       - app-network
     restart: unless-stopped
   
+  # 知识字典 worker（设计文档 §5：独立进程领取租约，不占用 API 事件循环）
+  dictionary-worker:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: shanhai-api:0.1.0
+    container_name: dictionary-worker
+    working_dir: /app
+    volumes:
+      - ./server:/app/server
+      - ./src:/app/src
+      - ./saves:/app/saves
+      - ./XinJiang:/app/XinJiang:ro
+      - ${MODEL_DIR:-./models}:/models
+      - sage_db:/app/db
+    environment:
+      - MILVUS_URI=http://milvus:19530
+      - MODEL_DIR=/models
+      - RUNNING_IN_DOCKER=true
+      - SAGE_DB_PATH=/app/db/server.db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      - MODEL_CREDENTIAL_MASTER_KEY=${MODEL_CREDENTIAL_MASTER_KEY:?Set MODEL_CREDENTIAL_MASTER_KEY in .env}
+      - MYSQL_HOST=${MYSQL_HOST:-mysql}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-test}
+      - MYSQL_USER=${MYSQL_USER:-app_user}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      - NEO4J_URI=bolt://graph:7687
+      - NEO4J_USERNAME=${NEO4J_USERNAME:?Set NEO4J_USERNAME in .env}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env}
+      - DICTIONARY_VECTOR_ENABLED=${DICTIONARY_VECTOR_ENABLED:-true}
+      - DICTIONARY_GENERATE_CONCURRENCY=${DICTIONARY_GENERATE_CONCURRENCY:-1}
+      - DICTIONARY_INDEX_CONCURRENCY=${DICTIONARY_INDEX_CONCURRENCY:-1}
+      - DICTIONARY_LEASE_TTL_SECONDS=${DICTIONARY_LEASE_TTL_SECONDS:-120}
+      - DICTIONARY_WORKER_POLL_SECONDS=${DICTIONARY_WORKER_POLL_SECONDS:-3}
+      # 上传文件受控存储随 saves 卷持久化
+      - DICTIONARY_UPLOAD_ROOT=/app/saves/dictionary_uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    command: uv run python -m server.dictionary_worker
+    networks:
+      - app-network
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
   # OLMOCR 模型服务
   olmocr:
     build:
