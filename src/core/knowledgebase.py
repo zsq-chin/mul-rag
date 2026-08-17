@@ -432,14 +432,20 @@ class KnowledgeBase:
             return None
         else:
             db_copy = db_dict.copy()
+            original_name = db_copy.get("name")
             original_description = db_copy.get("description")
             try:
                 milvus_info = self.get_collection_info(db_id)
                 db_copy.update(milvus_info)
+                # Milvus 返回的 name/collection_name 是内部集合标记（如 kb_xxx），
+                # 不得覆盖用户存储的知识库名称
+                if original_name:
+                    db_copy["name"] = original_name
                 if original_description: # Preserve original if Milvus info overwrote it
                     db_copy["description"] = original_description
             except Exception as e:
                 logger.warning(f"获取知识库 ID: {db_id} 的Milvus信息失败: {e}")
+                db_copy["name"] = original_name
                 db_copy.update({"row_count": 0, "status": "未连接", "error": str(e)})
             return db_copy
 
